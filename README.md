@@ -1,4 +1,4 @@
-# Waveshare USB-CAN-A Python Library and Diagnostic Tool
+# Waveshare USB-CAN-A Python Library
 
 Version 1.4.0 | 2026-02-12
 
