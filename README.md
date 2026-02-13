@@ -4,7 +4,7 @@ Version 1.4.0 | 2026-02-12
 
 ## Overview
 
-Professional CAN bus interface library for Waveshare USB-CAN-A dongles with comprehensive diagnostic tools. Supports Standard (11-bit) and Extended (29-bit) CAN identifiers at speeds from 5kbps to 1Mbps.
+Professional CAN bus interface library for Waveshare USB-CAN-A dongles with comprehensive diagnostic tools. Supports Standard (11-bit) and Extended (29-bit) CAN identifiers at speeds from 5kbps to 1Mbps. -> only tested with 500kbit/s
 
 ## Files
 
