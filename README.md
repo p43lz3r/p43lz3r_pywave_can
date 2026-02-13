@@ -20,7 +20,7 @@ Professional CAN bus interface library for Waveshare USB-CAN-A dongles with comp
 pip install pyserial
 ```
 
-### Optional (for DBC support)
+### Optional (for DBC support) -> Note: This is not yet tested!!
 
 ```bash
 pip install cantools
