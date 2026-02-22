@@ -2,8 +2,7 @@
 
 A CAN bus monitoring and diagnostic suite for the
 **Waveshare USB-CAN-A** dongle, built in Python with a full Terminal User
-Interface (TUI).  Designed to match the workflow and feature set of industry
-tools such as PEAK PCAN-View and Vector CANalyzer — entirely in a terminal,
+Interface (TUI).  Designed to run entirely in a terminal,
 cross-platform, no GUI required.
 
 ---
@@ -43,7 +42,7 @@ cross-platform, no GUI required.
 | **Live Monitor** | Real-time per-ID table with byte-change highlighting, rate, count, DLC |
 | **Stale Detection** | Frames with no data change for > 10 s turn red automatically |
 | **Trace** | Chronological frame log with Record / Pause / Stop controls |
-| **Export** | CSV, ASC (Vector CANalyzer), TRC (PEAK PCAN-View), BLF (python-can) |
+| **Export** | CSV, ASC, TRC (PEAK PCAN-View), BLF |
 | **Statistics** | Top-N IDs by rate / count, bus load percentage |
 | **Transmit** | Single-shot and cyclic frame transmission |
 | **Filter** | Whitelist / blacklist by CAN-ID, space- or comma-separated |
@@ -112,13 +111,13 @@ python3 can_tui.py
 # Basic start — select port and speed in the UI
 python3 can_tui.py
 
-# Auto-connect on startup
+# Auto-connect on startup (port may differ for your setup)
 python3 can_tui.py --port /dev/ttyUSB0 --speed 500K --connect
 
-# With DBC file loaded on startup
+# With DBC file loaded on startup (port may differ for your setup)
 python3 can_tui.py --port /dev/ttyUSB0 --speed 500K --dbc my_car.dbc --connect
 
-# Windows
+# Windows (port may differ for your setup)
 python can_tui.py --port COM3 --speed 500K --connect
 ```
 
