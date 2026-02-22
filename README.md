@@ -5,6 +5,8 @@ A CAN bus monitoring and diagnostic suite for the
 Interface (TUI).  Designed to run entirely in a terminal,
 cross-platform, no GUI required.
 
+![20260220_181255](https://github.com/user-attachments/assets/0bad2f4e-777d-4a2a-9fd4-12481b0eb92f)
+
 ---
 
 ## Table of Contents
