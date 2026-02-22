@@ -1,556 +1,443 @@
 # Waveshare USB-CAN-A Python Library
 
-Version 1.4.0 | 2026-02-12
+A CAN bus monitoring and diagnostic suite for the
+**Waveshare USB-CAN-A** dongle, built in Python with a full Terminal User
+Interface (TUI).  Designed to match the workflow and feature set of industry
+tools such as PEAK PCAN-View and Vector CANalyzer — entirely in a terminal,
+cross-platform, no GUI required.
 
-## Overview
+---
 
-Professional CAN bus interface library for Waveshare USB-CAN-A dongles with comprehensive diagnostic tools. Supports Standard (11-bit) and Extended (29-bit) CAN identifiers at speeds from 5kbps to 1Mbps. -> only tested with 500kbit/s
+## Table of Contents
 
-## Files
+- [Features](#features)
+- [Hardware Requirements](#hardware-requirements)
+- [Software Requirements](#software-requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [CLI Arguments](#cli-arguments)
+- [User Interface](#user-interface)
+  - [Main Screen](#main-screen)
+  - [Live Monitor](#live-monitor)
+  - [Trace Tab](#trace-tab)
+  - [Statistics Tab](#statistics-tab)
+  - [DBC Tab](#dbc-tab)
+  - [F4 Details Screen](#f4-details-screen)
+  - [F6 Fullscreen Monitor](#f6-fullscreen-monitor)
+  - [F7 Signal Discovery](#f7-signal-discovery)
+- [Keyboard Shortcuts](#keyboard-shortcuts)
+- [Frame Type & Auto-Detection](#frame-type--auto-detection)
+- [DBC File Support](#dbc-file-support)
+- [Log Export Formats](#log-export-formats)
+- [Known Hardware Limitations](#known-hardware-limitations)
+- [File Overview](#file-overview)
+- [Version History](#version-history)
+- [ToDo / Roadmap](#todo--roadmap)
 
-- waveshare_can.py - Core library with thread-safe CAN interface
-- can_diagnostic_tool.py - Full-featured CLI diagnostic tool
-- Additional scripts for testing and examples
+---
+
+## Features
+
+| Category | Capability |
+|---|---|
+| **Live Monitor** | Real-time per-ID table with byte-change highlighting, rate, count, DLC |
+| **Stale Detection** | Frames with no data change for > 10 s turn red automatically |
+| **Trace** | Chronological frame log with Record / Pause / Stop controls |
+| **Export** | CSV, ASC (Vector CANalyzer), TRC (PEAK PCAN-View), BLF (python-can) |
+| **Statistics** | Top-N IDs by rate / count, bus load percentage |
+| **Transmit** | Single-shot and cyclic frame transmission |
+| **Filter** | Whitelist / blacklist by CAN-ID, space- or comma-separated |
+| **DBC Support** | Load `.dbc` files for live signal decoding and message name display |
+| **Signal Discovery** | Snapshot-based change detection with noise filtering (F7) |
+| **Themes** | Multiple colour themes, cycle with `t` |
+| **Frame Type** | Auto-detect Standard (11-bit) vs Extended (29-bit) on connect |
+| **Cross-platform** | Linux and Windows (serial port detection automatic) |
+
+---
+
+## Hardware Requirements
+
+- **Waveshare USB-CAN-A** dongle
+  (USB to CAN bus converter, variable-length serial protocol)
+- CAN bus to connect to (vehicle, test bench, Raspberry Pi with MCP2515, etc.)
+
+> **Hardware note:** The Waveshare USB-CAN-A dongle can receive **only one
+> frame type at a time** — either Standard (11-bit) or Extended (29-bit).
+> This is a hardware/protocol limitation documented in the Waveshare spec
+> (config byte 4: `0x01` = Standard only, `0x02` = Extended only).
+> The tool handles this transparently via Auto-Detection on connect.
+> See [Frame Type & Auto-Detection](#frame-type--auto-detection).
+
+---
+
+## Software Requirements
+
+| Package | Version | Notes |
+|---|---|---|
+| Python | ≥ 3.10 | f-strings, `match`, dataclasses |
+| `pyserial` | any | Serial communication with dongle |
+| `textual` | ≥ 0.50 | TUI framework |
+| `rich` | any | Coloured text in tables (installed with textual) |
+| `cantools` | ≥ 39.0 | DBC file parsing and signal decoding |
+| `python-can` | any | **Optional** — required for BLF export only |
+
+---
 
 ## Installation
 
-### Requirements
+```bash
+# 1. Clone or copy the project files
+git clone https://github.com/yourname/waveshare-can-python
+cd waveshare-can-python
+
+# 2. Install dependencies
+pip install pyserial textual cantools
+
+# Optional: BLF export support
+pip install python-can
+
+# 3. On Linux: add your user to the dialout group (one-time)
+sudo usermod -aG dialout $USER
+# then log out and back in
+
+# 4. Run
+python3 can_tui.py
+```
+
+---
+
+## Quick Start
 
 ```bash
-pip install pyserial
+# Basic start — select port and speed in the UI
+python3 can_tui.py
+
+# Auto-connect on startup
+python3 can_tui.py --port /dev/ttyUSB0 --speed 500K --connect
+
+# With DBC file loaded on startup
+python3 can_tui.py --port /dev/ttyUSB0 --speed 500K --dbc my_car.dbc --connect
+
+# Windows
+python can_tui.py --port COM3 --speed 500K --connect
 ```
 
-### Optional (for DBC support) -> Note: This is not yet tested!!
+---
+
+## CLI Arguments
+
+| Argument | Short | Description |
+|---|---|---|
+| `--port PORT` | `-p` | Serial port (e.g. `/dev/ttyUSB0` or `COM3`) |
+| `--speed SPEED` | `-s` | CAN bitrate: `5K 10K 20K 50K 100K 125K 200K 250K 400K 500K 800K 1M` |
+| `--dbc FILE` | `-d` | Path to a `.dbc` file to load on startup |
+| `--connect` | `-c` | Auto-connect on startup (requires `--port`) |
+
+---
+
+## User Interface
+
+### Main Screen
+
+The main screen is split into two columns:
+
+**Left column**
+- Connection panel (port, speed, mode, frame type selectors)
+- Live Monitor table
+
+**Right column**
+- Status panel (connection state, RX counters, bus load, detected frame type)
+- Transmit panel (single-shot and cyclic transmission)
+- Filter & Sort panel
+
+A tabbed area on the right holds: **Monitor · Trace · Statistics · DBC**
+
+---
+
+### Live Monitor
+
+The central table updates every 200 ms and shows one row per unique CAN-ID:
+
+| Column | Description |
+|---|---|
+| ID | Hex CAN-ID, suffixed with DBC message name if loaded |
+| Type | `Std` (11-bit) or `Ext` (29-bit) |
+| DLC | Data length in bytes |
+| Rate Hz | Frames per second (rolling average) |
+| Count | Total frames received |
+| Data | Hex bytes — changed bytes highlighted for 1 second |
+
+**Stale highlighting:** If a frame's data has not changed for more than
+10 seconds, the DLC and Data cells turn red. This makes inactive signals
+immediately visible on a busy bus.
+
+---
+
+### Trace Tab
+
+Chronological log of every frame received (and transmitted):
+
+- **Record** — start recording (blinking `● REC` indicator in header)
+- **Pause** — freeze the display without losing incoming frames
+- **Stop** — end recording, keep buffer for export
+- **Clear** — discard the trace buffer
+- **Export** — save to file in the selected format
+
+Trace columns: `Time (s)` · `CAN-ID` · `Dir (Rx/Tx)` · `DLC` · `Data`
+
+A warning is shown when the buffer exceeds 100 000 frames.
+
+---
+
+### Statistics Tab
+
+Top-30 CAN-IDs ranked by receive rate, with a bus load summary line.
+Refreshes every 2 seconds.
+
+---
+
+### DBC Tab
+
+Load a `.dbc` file to enable:
+- Message names shown next to CAN-IDs in the monitor
+- Live signal decoding in a dedicated signals table
+- DBC status in Signal Discovery results
+
+---
+
+### F4 Details Screen
+
+Push `F4` to open a full-screen overlay with:
+- Extended log view (last 200 lines)
+- DBC file path input and load/unload controls
+- Live decoded signals table (refreshes every second)
+
+---
+
+### F6 Fullscreen Monitor
+
+Push `F6` for a fullscreen version of the live monitor table.
+Main-screen timers are paused while F6 is active.
+Click any row to pin/unpin that CAN-ID for focused monitoring.
+
+---
+
+### F7 Signal Discovery
+
+The Signal Discovery screen (`F7`) helps identify which CAN-IDs change
+in response to a specific physical action (door, button, switch, etc.).
+It works by comparing two bus snapshots and showing the byte-level diff.
+
+#### Workflow — with Noise Filter (recommended on active buses)
+
+```
+[o] Observe Start
+      │
+      │  Watch the bus for a few seconds while it is idle.
+      │  Every CAN-ID that changes is added to the Noise set.
+      │  The header shows live: "Noise erkannt: 12 IDs"
+      │
+[c] Capture Start  ←── Observe ends, Snapshot 1 taken
+      │
+      │  Perform the physical action (open door, press button, …)
+      │
+[x] Capture Stop   ←── Snapshot 2 taken
+      │
+      ▼
+  RESULTS table — Noise IDs filtered out automatically
+```
+
+#### Workflow — without Noise Filter (quick mode)
+
+Press `[c]` directly without `[o]` first.  
+No noise filtering is applied — all changed IDs are shown.
+
+#### Results Table
+
+| Column | Description |
+|---|---|
+| CAN-ID | Hex identifier |
+| Status | `✓ MessageName` (DBC known) · `⚠ Unbekannt` (no DBC match) |
+| Δ Bytes | Indices of bytes that changed, e.g. `[0] [3] [5]` |
+| VORHER | Byte values before action — changed bytes in **red** |
+| NACHHER | Byte values after action — changed bytes in **green** |
+
+#### Discovery Controls
+
+| Key | Action |
+|---|---|
+| `o` | Observe Start — build noise baseline |
+| `c` | Capture Start — from IDLE, OBSERVING, or RESULTS |
+| `x` | Capture Stop — compute and show results |
+| `s` | Cycle sort: ID ↑ → Δ-Bytes ↓ → Status |
+| `u` | Toggle filter: All results ↔ Unknown (no DBC match) only |
+| `Esc` / `q` | Return to main screen |
+
+#### Edge Cases
+
+| Situation | Behaviour |
+|---|---|
+| `[c]` without prior `[o]` | No noise filter — all changes shown |
+| All changes were noise | Header: "All changes were noise — shorten Observe or use `[c]` directly" |
+| `Del` during OBSERVING | Noise baseline reset; Observe continues with fresh data |
+| `Del` during CAPTURING | Warning shown in results: data may be incomplete |
+| Empty store at `[c]` | Warning: connect first and receive frames |
+
+---
+
+## Keyboard Shortcuts
+
+### Main Screen
+
+| Key | Action |
+|---|---|
+| `F1` | Keyboard shortcuts help |
+| `F2` | Connect |
+| `F3` | Disconnect |
+| `F4` | Details screen (log + DBC) |
+| `F5` | Refresh port list |
+| `F6` | Fullscreen monitor |
+| `F7` | Signal Discovery |
+| `Space` | Pause / resume live monitor |
+| `Del` | Clear monitor and frame store |
+| `s` | Cycle sort mode |
+| `f` | Focus filter input |
+| `t` | Cycle colour theme |
+| `q` | Quit |
+
+---
+
+## Frame Type & Auto-Detection
+
+The Waveshare USB-CAN-A dongle accepts only **one frame type at a time**:
+
+| Setting | Byte 4 | Receives |
+|---|---|---|
+| Standard | `0x01` | 11-bit IDs only |
+| Extended | `0x02` | 29-bit IDs only |
+
+The **Frame Type** selector in the connection panel offers three options:
+
+- **Auto-Detect** *(default)* — on connect, listens 3 seconds for Extended
+  frames. If none arrive, automatically switches to Standard and listens for
+  another 3 seconds. The detected type is shown in the status panel and the
+  selector is updated. If no frames arrive in either mode, a warning is shown
+  suggesting a baudrate or bus-activity check.
+- **Extended (29-bit)** — fixed Extended mode, no detection.
+- **Standard (11-bit)** — fixed Standard mode, no detection.
+
+> Most modern vehicle buses (CAN FD, ISO-TP diagnostics, OBD-II on newer
+> vehicles) use Extended 29-bit IDs. Classic/legacy buses and many body
+> control modules use Standard 11-bit IDs. Mixed buses (both types
+> simultaneously) are rare in practice.
+
+---
+
+## DBC File Support
+
+Load any `.dbc` file to enable message and signal decoding:
 
 ```bash
-pip install cantools
+# Via CLI
+python3 can_tui.py --dbc path/to/your.dbc
+
+# Via UI
+# F4 → DBC path input → Enter or "Load" button
 ```
 
-## Core Library: waveshare_can.py
-
-### Quick Start
-
-```python
-from waveshare_can import WaveshareCAN, CANSpeed, CANMode
-
-# Initialize
-can = WaveshareCAN(port="/dev/ttyUSB0")
-
-# Open and configure
-can.open()
-can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL)
-
-# Start listening
-can.start_listening()
-
-# Send a message
-can.send(0x123, bytes([0x11, 0x22, 0x33, 0x44]), is_extended=False)
-
-# Receive a message
-frame = can.get_frame(timeout=1.0)
-if frame:
-    print(f"ID: {hex(frame.can_id)}, Data: {frame.data.hex()}")
-
-# Close
-can.close()
-```
-
-### Class: WaveshareCAN
-
-#### Initialization
-
-```python
-WaveshareCAN(port="/dev/ttyUSB0", timeout=0.1)
-```
-
-Parameters:
-- port: Serial port device path (default: /dev/ttyUSB0)
-- timeout: Serial read timeout in seconds (default: 0.1)
-
-#### Methods
-
-**open() -> bool**
-
-Opens serial connection to the dongle.
-
-Returns: True if successful, False otherwise
-
-```python
-if can.open():
-    print("Connected")
-```
-
-**setup(speed=CANSpeed, mode=CANMode, extended=True) -> bool**
-
-Configures CAN bus parameters.
-
-Parameters:
-- speed: CAN bus speed (see CANSpeed enum)
-- mode: Operating mode (see CANMode enum)
-- extended: Enable extended frame support (default: True)
-
-Returns: True if successful
-
-```python
-can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL)
-```
-
-**start_listening()**
-
-Starts background thread for receiving CAN frames. Frames are queued automatically.
-
-```python
-can.start_listening()
-```
-
-**stop_listening()**
-
-Stops the background receiver thread.
-
-```python
-can.stop_listening()
-```
-
-**send(can_id, data, is_extended=True, verbose=False) -> bool**
-
-Sends a single CAN frame.
-
-Parameters:
-- can_id: CAN identifier (0-0x7FF for Standard, 0-0x1FFFFFFF for Extended)
-- data: Data bytes (0-8 bytes)
-- is_extended: True for Extended (29-bit) ID, False for Standard (11-bit)
-- verbose: Print debug information (default: False)
-
-Returns: True if sent successfully
-
-```python
-# Standard frame
-can.send(0x123, bytes([0xAA, 0xBB, 0xCC]), is_extended=False)
-
-# Extended frame
-can.send(0x12345678, bytes([0xDE, 0xAD, 0xBE, 0xEF]), is_extended=True)
-```
-
-**send_cyclic(name, can_id, data, period_ms, is_extended=True)**
-
-Starts cyclic transmission at fixed interval.
-
-Parameters:
-- name: Unique identifier for this cyclic task
-- can_id: CAN identifier
-- data: Data bytes
-- period_ms: Transmission period in milliseconds
-- is_extended: True for Extended ID
-
-```python
-# Send heartbeat every 100ms
-can.send_cyclic("heartbeat", 0x100, bytes([0x01]), period_ms=100, is_extended=False)
-```
-
-**stop_cyclic(name)**
-
-Stops a cyclic transmission task.
-
-```python
-can.stop_cyclic("heartbeat")
-```
-
-**get_frame(timeout=None) -> CANFrame | None**
-
-Retrieves a frame from the receive queue.
-
-Parameters:
-- timeout: Wait timeout in seconds (None = blocking, 0 = non-blocking)
-
-Returns: CANFrame object or None if timeout
-
-```python
-# Blocking
-frame = can.get_frame()
-
-# Non-blocking
-frame = can.get_frame(timeout=0)
-
-# Wait up to 1 second
-frame = can.get_frame(timeout=1.0)
-```
-
-**close()**
-
-Closes connection and cleans up resources. Stops all cyclic tasks and receiver thread.
-
-```python
-can.close()
-```
-
-#### Callbacks
-
-**on_message_received**
-
-Set callback function for real-time message processing. Called from background thread when frame received.
-
-```python
-def my_handler(frame):
-    print(f"Received: {frame}")
-
-can.on_message_received = my_handler
-```
-
-### Enums
-
-#### CANSpeed
-
-```python
-CANSpeed.SPEED_5K      # 5 kbps
-CANSpeed.SPEED_10K     # 10 kbps
-CANSpeed.SPEED_20K     # 20 kbps
-CANSpeed.SPEED_25K     # 25 kbps
-CANSpeed.SPEED_40K     # 40 kbps
-CANSpeed.SPEED_50K     # 50 kbps
-CANSpeed.SPEED_80K     # 80 kbps
-CANSpeed.SPEED_100K    # 100 kbps
-CANSpeed.SPEED_125K    # 125 kbps
-CANSpeed.SPEED_200K    # 200 kbps
-CANSpeed.SPEED_250K    # 250 kbps
-CANSpeed.SPEED_400K    # 400 kbps
-CANSpeed.SPEED_500K    # 500 kbps (most common)
-CANSpeed.SPEED_666K    # 666 kbps
-CANSpeed.SPEED_800K    # 800 kbps
-CANSpeed.SPEED_1M      # 1 Mbps
-```
-
-#### CANMode
-
-```python
-CANMode.NORMAL           # Standard operation - receives both Standard and Extended
-CANMode.LOOPBACK         # Transmit echoes back (self-test)
-CANMode.SILENT           # Listen-only (no ACK)
-CANMode.LOOPBACK_SILENT  # Combined
-```
-
-#### CANFrame
-
-```python
-frame.can_id        # CAN identifier (int)
-frame.data          # Data bytes (bytes)
-frame.is_extended   # True if Extended ID (bool)
-frame.timestamp     # Unix timestamp (float)
-```
-
-### Usage Examples
-
-#### Example 1: Basic Send/Receive
-
-```python
-from waveshare_can import WaveshareCAN, CANSpeed, CANMode
-
-can = WaveshareCAN()
-can.open()
-can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL)
-can.start_listening()
-
-# Send
-can.send(0x123, bytes([0x11, 0x22, 0x33, 0x44]), is_extended=False)
-
-# Receive
-frame = can.get_frame(timeout=1.0)
-if frame:
-    print(frame)
-
-can.close()
-```
-
-#### Example 2: Cyclic Transmission
-
-```python
-can = WaveshareCAN()
-can.open()
-can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL)
-
-# Start cyclic messages
-can.send_cyclic("status", 0x100, bytes([0x01, 0x02]), period_ms=100)
-can.send_cyclic("heartbeat", 0x200, bytes([0xFF]), period_ms=1000)
-
-time.sleep(10)  # Run for 10 seconds
-
-can.stop_cyclic("status")
-can.stop_cyclic("heartbeat")
-can.close()
-```
-
-#### Example 3: Callback Processing
-
-```python
-def message_handler(frame):
-    if frame.can_id == 0x123:
-        print(f"Important message: {frame.data.hex()}")
-
-can = WaveshareCAN()
-can.on_message_received = message_handler
-
-can.open()
-can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL)
-can.start_listening()
-
-# Messages trigger callback automatically
-time.sleep(60)
-
-can.close()
-```
-
-#### Example 4: Loopback Self-Test
-
-```python
-can = WaveshareCAN()
-can.open()
-can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.LOOPBACK)
-can.start_listening()
-
-# Send message
-can.send(0x123, bytes([0x11, 0x22, 0x33]))
-
-# Should receive it back
-frame = can.get_frame(timeout=0.5)
-if frame and frame.can_id == 0x123:
-    print("Loopback test PASSED")
-
-can.close()
-```
-
-#### Example 5: Non-blocking Reception
-
-```python
-can = WaveshareCAN()
-can.open()
-can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL)
-can.start_listening()
-
-while True:
-    # Non-blocking check
-    frame = can.get_frame(timeout=0)
-    
-    if frame:
-        print(f"Frame received: {frame}")
-    else:
-        # Do other work
-        time.sleep(0.01)
-```
-
-## Diagnostic Tool: can_diagnostic_tool.py
-
-Command-line interface for CAN bus diagnostics.
-
-### Usage
-
-```bash
-python3 can_diagnostic_tool.py [options]
-```
-
-### Options
-
-```
---port, -p      Serial port (default: /dev/ttyUSB0)
---speed, -s     CAN bus speed in kbps (default: 500)
-                Choices: 5, 10, 20, 25, 40, 50, 80, 100, 125, 200, 250, 400, 500, 666, 800, 1000
---mode, -m      CAN operating mode (default: normal)
-                Choices: normal, loopback, silent, loopback-silent
---dbc           DBC file for signal decoding
---log           Log file for recording CAN traffic (CSV format)
---monitor       Use fixed-view monitor mode (default: logger mode)
---send ID DATA  Send single message
-```
-
-### Monitor Mode
-
-Fixed-view display that updates in place. Shows real-time statistics, message rates, and decoded signals.
-
-```bash
-python3 can_diagnostic_tool.py --monitor --speed 500
-```
-
-Output:
-```
-================================================================================
-CAN Bus Monitor - 2026-02-12 14:30:45
-Total Frames: 1523 | Unique IDs: 8
-================================================================================
-
-          ID   Type  DLC Rate (Hz)                     Data Signals/Decoded
---------------------------------------------------------------------------------
-    0x000100    Std    4       10.0              01 02 03 04 
-    0x000200    Std    8        5.0  AA BB CC DD EE FF 00 11 
- 0x12345678    Ext    4        1.0              DE AD BE EF 
---------------------------------------------------------------------------------
-
-Press Ctrl+C to stop
-```
-
-### Logger Mode
-
-Scrolling output with optional CSV logging.
-
-```bash
-python3 can_diagnostic_tool.py --log traffic.csv --speed 500
-```
-
-Output:
-```
---- CAN Bus Logger Mode ---
-[Std] ID: 0x100 | DLC: 4 | Data: 01 02 03 04
-[Ext] ID: 0x12345678 | DLC: 4 | Data: DE AD BE EF
-```
-
-CSV format:
-```
-timestamp,can_id,data,is_extended
-2026-02-12T14:30:45.123456,00000100,01020304,False
-2026-02-12T14:30:45.234567,12345678,DEADBEEF,True
-```
-
-### Send Mode
-
-Send single message and exit.
-
-```bash
-# Standard frame
-python3 can_diagnostic_tool.py --send 0x123 "11 22 33 44"
-
-# Extended frame (auto-detected if ID > 0x7FF)
-python3 can_diagnostic_tool.py --send 0x12345678 "DE AD BE EF"
-```
-
-### DBC File Support
-
-Decode signals using DBC database.
-
-```bash
-python3 can_diagnostic_tool.py --monitor --dbc vehicle.dbc
-```
-
-Requires: pip install cantools
-
-### Examples
-
-Monitor 250kbps bus:
-```bash
-python3 can_diagnostic_tool.py --monitor --speed 250
-```
-
-Log 1Mbps traffic to file:
-```bash
-python3 can_diagnostic_tool.py --log high_speed.csv --speed 1000
-```
-
-Send test message:
-```bash
-python3 can_diagnostic_tool.py --send 0x456 "AA BB CC DD EE FF"
-```
-
-Loopback self-test with monitoring:
-```bash
-python3 can_diagnostic_tool.py --monitor --mode loopback
-```
-
-## Protocol Details
-
-### Waveshare USB-CAN-A Protocol
-
-Serial: 2,000,000 bps, 8N1
-
-#### Setup Command
-
-Format: [0xAA, 0x55, 0x12, Speed, Mode, Filter(14 bytes), Checksum]
-
-Working configuration (500kbps, receives both ID types):
-```
-[0xAA, 0x55, 0x12, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00,
- 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16]
-```
-
-- Byte 3: Speed (0x03 = 500kbps)
-- Byte 4: Mode (0x01 = receives both Standard and Extended)
-- Byte 19: Checksum (sum of bytes[2:19] & 0xFF)
-
-#### Frame Format
-
-Standard frame (11-bit ID):
-```
-[0xAA][Control][ID_Low][ID_High][Data...][0x55]
-```
-
-Extended frame (29-bit ID):
-```
-[0xAA][Control][ID0][ID1][ID2][ID3][Data...][0x55]
-```
-
-Control byte:
-- Bits 7-6: Always 11 (data frame marker)
-- Bit 5: Extended flag (1 = Extended, 0 = Standard)
-- Bits 0-3: DLC (0-8)
-
-Examples:
-- Standard 4 bytes: 0xC4 = 11000100
-- Extended 4 bytes: 0xE4 = 11100100
-- Extended 8 bytes: 0xE8 = 11101000
-
-ID encoding: Little Endian
-- Standard: ID = byte0 | (byte1 << 8)
-- Extended: ID = byte0 | (byte1<<8) | (byte2<<16) | (byte3<<24)
-
-## Thread Safety
-
-All library operations are thread-safe:
-- Transmission uses mutex locking
-- Reception uses dedicated thread with queue
-- Cyclic tasks run in separate threads
-- Queue capacity: 1000 frames
-
-## Performance
-
-- Maximum throughput: ~10,000 frames/second (USB bandwidth limited)
-- Latency: <1ms from hardware to queue
-- Queue overflow: Warning printed, frame dropped
-
-## Troubleshooting
-
-### Permission Denied
-
-```bash
-sudo usermod -a -G dialout $USER
-# Log out and back in
-```
-
-### No Frames Received
-
-- Check CAN bus termination (120Ω at both ends)
-- Verify bus speed matches (both devices same speed)
-- Check wiring: CAN_H, CAN_L, GND
-- Test with loopback mode first
-
-### Queue Full Warning
-
-Process frames faster or increase queue size in __init__:
-```python
-self.rx_queue = queue.Queue(maxsize=2000)  # Increase from 1000
-```
-
-## Testing
-
-Run comprehensive reliability tests:
-```bash
-python3 reliability_test.py
-```
-
-Quick loopback test:
-```bash
-python3 loopback_test.py
-```
-
-## License
-
-Free to use and modify. No warranty provided.
-
-## Support
-
-For issues with Waveshare hardware, consult manufacturer documentation.
-For library issues, verify with loopback test first.
+With a DBC loaded:
+- CAN-IDs in the monitor show the message name: `0x3B4 DoorControl`
+- The DBC signals table decodes live signal values
+- Signal Discovery shows `✓ MessageName` for known messages
+
+> **Partial DBC coverage is common.** A message may be listed in the DBC
+> with only some of its signals defined. Signal Discovery will correctly
+> identify the message name, but bytes not covered by any signal definition
+> are not further decoded. This is a known limitation and a planned
+> improvement (see ToDo).
+
+---
+
+## Log Export Formats
+
+| Format | Extension | Tool compatibility |
+|---|---|---|
+| CSV | `.csv` | Excel, Python, any text tool |
+| ASC | `.asc` | Vector CANalyzer, CANoe |
+| TRC | `.trc` | PEAK PCAN-View v2.1 |
+| BLF | `.blf` | Vector tools (requires `python-can`) |
+
+Export is available from the Trace tab after stopping a recording.
+
+---
+
+## Known Hardware Limitations
+
+| Limitation | Details |
+|---|---|
+| One frame type at a time | Waveshare protocol byte 4: `0x01` Std or `0x02` Ext, no combined mode |
+| No CAN FD support | The USB-CAN-A is a classic CAN (ISO 11898) adapter, max 1 Mbit/s |
+| Serial baud fixed at 2 Mbit/s | USB ↔ dongle communication speed is fixed in hardware |
+| Same CAN-ID in Std and Ext | If a Standard and Extended frame share the same numeric ID, they occupy the same row in the monitor (latent issue, rare in practice) |
+
+---
+
+## File Overview
+
+| File | Description |
+|---|---|
+| `can_tui.py` | Main TUI application — all screens, timers, UI logic |
+| `waveshare_can.py` | Low-level Waveshare dongle driver — serial protocol, RX thread |
+| `can_log_exporter.py` | Multi-format trace export module (CSV / ASC / TRC / BLF) |
+| `can_diagnostic_tool.py` | Standalone CLI diagnostic tool (independent of TUI) |
+| `example_CAN.dbc` | Example DBC file for testing signal decoding |
+
+---
+
+## Version History
+
+| Version | Date | Highlights |
+|---|---|---|
+| v0.9.1 | 2026-02-19 | Timer optimisations, blinking REC indicator |
+| v1.0.0 | 2026-02-22 | Multi-format trace export (CSV / ASC / TRC / BLF), format selector |
+| v1.1.0 | 2026-02-22 | Signal Discovery screen (F7), Stale Value Highlighting (10 s) |
+| v1.2.0 | 2026-02-22 | `CANFrameType` enum, Frame Type selector, Auto-Detection on connect |
+| v1.3.0 | 2026-02-22 | Discovery Observe phase: noise baseline, `[o]` key, noise filtering |
+
+---
+
+## ToDo / Roadmap
+
+The following features are planned but not yet implemented, roughly in
+priority order:
+
+**Signal Discovery**
+- **Soft noise marking (Option A)** — instead of hard-filtering noise IDs,
+  mark them with `~` status and allow toggling their visibility with a key.
+  Currently noise IDs are always hidden (strict mode only).
+- **Byte-level DBC coverage check** — for known messages, flag bytes that are
+  not covered by any signal definition as `~ Undefined byte`. Currently the
+  status is binary (message known / unknown), but a message can have undocumented
+  signals occupying bytes that the DBC does not define.
+- **Bit-diff display** — for changed bytes, show which individual bits changed
+  (e.g. `0x1F → 0x2F  bit 4↓ bit 5↑`). High value for manual reverse
+  engineering without a DBC.
+- **Signal value decoding in results** — for known messages with a DBC loaded,
+  decode and display signal values (VORHER/NACHHER) alongside byte values.
+- **CSV / JSON export** of Discovery results.
+
+**Monitor**
+- **Configurable stale timeout** — currently fixed at 10 seconds (`STALE_TIMEOUT_S`).
+- **CAN-ID collision handling** — Standard and Extended frames with the same
+  numeric ID currently share one monitor row. Use `(can_id, is_extended)` tuple
+  as the store key.
+
+**Connection**
+- **Configurable Auto-Detection timeout** — currently fixed at 3 seconds
+  (`AUTO_DETECT_TIMEOUT_S`) per frame type.
+
+**Export / Analysis**
+- **Bit-level visualisation** — heatmap of which bits change most frequently
+  across a recording session.
+- **Replay** — send back a recorded trace to the bus for stimulus/response
+  testing.
