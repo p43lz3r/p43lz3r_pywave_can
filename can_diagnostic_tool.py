@@ -21,7 +21,7 @@ try:
     CANTOOLS_AVAILABLE = True
 except ImportError:
     CANTOOLS_AVAILABLE = False
-    print("⚠ cantools not installed. DBC decoding disabled.")
+    print("âš  cantools not installed. DBC decoding disabled.")
     print("  Install with: pip install cantools")
 
 
@@ -59,15 +59,15 @@ class FixedViewDisplay:
     def load_dbc(self, dbc_path: str) -> bool:
         """Load a DBC file for signal decoding"""
         if not CANTOOLS_AVAILABLE:
-            print("✗ cantools not available")
+            print("âœ— cantools not available")
             return False
         
         try:
             self.db = cantools.database.load_file(dbc_path)
-            print(f"✓ Loaded DBC: {dbc_path} ({len(self.db.messages)} messages)")
+            print(f"âœ“ Loaded DBC: {dbc_path} ({len(self.db.messages)} messages)")
             return True
         except Exception as e:
-            print(f"✗ Failed to load DBC: {e}")
+            print(f"âœ— Failed to load DBC: {e}")
             return False
     
     def update(self, frame: CANFrame):
@@ -188,7 +188,7 @@ class CANDiagnosticTool:
         # Start listening
         self.can.start_listening()
         
-        print("\n✓ Diagnostic tool started")
+        print("\nâœ“ Diagnostic tool started")
         print("  Press Ctrl+C to stop\n")
         time.sleep(1)
         
@@ -202,7 +202,7 @@ class CANDiagnosticTool:
                 self.display.render()
                 time.sleep(refresh_rate)
         except KeyboardInterrupt:
-            print("\n\n✓ Stopping...")
+            print("\n\nâœ“ Stopping...")
         finally:
             self.stop()
     
@@ -215,9 +215,9 @@ class CANDiagnosticTool:
         if log_file:
             try:
                 file_handle = open(log_file, 'w')
-                print(f"✓ Logging to {log_file}\n")
+                print(f"âœ“ Logging to {log_file}\n")
             except Exception as e:
-                print(f"✗ Failed to open log file: {e}")
+                print(f"âœ— Failed to open log file: {e}")
         
         try:
             while self.running:
@@ -236,19 +236,19 @@ class CANDiagnosticTool:
                         file_handle.flush()
         
         except KeyboardInterrupt:
-            print("\n✓ Stopping...")
+            print("\nâœ“ Stopping...")
         finally:
             if file_handle:
                 file_handle.close()
-                print(f"✓ Log saved to {log_file}")
+                print(f"âœ“ Log saved to {log_file}")
             self.stop()
     
     def send_message(self, can_id: int, data: bytes, is_extended: bool = True):
         """Send a single CAN message"""
         if self.can.send(can_id, data, is_extended, verbose=True):
-            print(f"✓ Sent: ID=0x{can_id:X}, Data={data.hex(' ').upper()}")
+            print(f"âœ“ Sent: ID=0x{can_id:X}, Data={data.hex(' ').upper()}")
         else:
-            print(f"✗ Failed to send message")
+            print(f"âœ— Failed to send message")
     
     def send_cyclic_message(self, 
                            name: str,
@@ -362,7 +362,7 @@ def main():
             time.sleep(0.2)  # Give message time to transmit
             tool.stop()
         else:
-            print("\n✗ Failed to start CAN interface")
+            print("\nâœ— Failed to start CAN interface")
             sys.exit(1)
         return
     
