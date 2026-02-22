@@ -1,6 +1,6 @@
 # Waveshare USB-CAN-A Python Library
 
-A CAN bus monitoring and diagnostic suite for the
+A CAN bus monitoring and diagnostic tool for the
 **Waveshare USB-CAN-A** dongle, built in Python with a full Terminal User
 Interface (TUI).  Designed to run entirely in a terminal,
 cross-platform, no GUI required.
