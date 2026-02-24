@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# 2026-02-23 23:00 v1.6.0 - Single midnight theme only; theme switching removed.
+#                           CSS baked at startup from theme_midnight.THEME.
+#                           Correct theming on all screens at startup.
+# 2026-02-23 22:00 v1.5.0 - Themes reduced to midnight + green; _build_css().
+# 2026-02-23 20:00 v1.4.0 - Transmit panel: ID field widened for 29-bit ext IDs,
+#                           Period + Name on same row as ID.
+#                           Screen navigation: F4/F6/F7 always return to main with
+#                           single Q or Esc (no stacking). F1 Help removed.
 # 2026-02-22 15:00 v1.0.0 - Multi-format trace export: CSV, ASC (Vector CANalyzer),
 #                           TRC (PEAK PCAN-View), BLF (Vector Binary Logging Format).
 #                           Format selector dropdown added to Trace tab.
@@ -54,6 +62,8 @@ from textual.timer import Timer
 
 from waveshare_can import WaveshareCAN, CANFrame, CANSpeed, CANMode, CANFrameType
 
+import theme_midnight
+
 try:
     import cantools
     import cantools.database
@@ -62,6 +72,13 @@ except ImportError:
     CANTOOLS_AVAILABLE = False
 
 from can_log_exporter import ExportFormat, export_records
+
+
+# ---------------------------------------------------------------------------
+# Application version – single source of truth referenced by SUB_TITLE,
+# _update_rec_indicator() and DiscoveryScreen.action_pop_screen().
+# ---------------------------------------------------------------------------
+_APP_VERSION = "v1.6.0"
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +192,22 @@ SPEED_MAX_FPS: Dict[CANSpeed, float] = {
 
 # Fallback max FPS used when the current speed is not found in the dict
 _DEFAULT_MAX_FPS = 500_000 / _BITS_PER_FRAME
+
+# Maps CANSpeed enum → bitrate in bps (used for log file headers)
+_SPEED_TO_BITRATE: Dict[CANSpeed, int] = {
+    CANSpeed.SPEED_5K:   5_000,
+    CANSpeed.SPEED_10K:  10_000,
+    CANSpeed.SPEED_20K:  20_000,
+    CANSpeed.SPEED_50K:  50_000,
+    CANSpeed.SPEED_100K: 100_000,
+    CANSpeed.SPEED_125K: 125_000,
+    CANSpeed.SPEED_200K: 200_000,
+    CANSpeed.SPEED_250K: 250_000,
+    CANSpeed.SPEED_400K: 400_000,
+    CANSpeed.SPEED_500K: 500_000,
+    CANSpeed.SPEED_800K: 800_000,
+    CANSpeed.SPEED_1M:   1_000_000,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +364,11 @@ class CANFrameStore:
         """Remove all stored frames and set the dirty flag."""
         with self._lock:
             self._rows.clear()
+            self._dirty = True
+
+    def mark_dirty(self) -> None:
+        """Force a full table repopulation on the next monitor tick."""
+        with self._lock:
             self._dirty = True
 
 
@@ -622,6 +660,36 @@ class DBCDatabase:
             msg = self._msg_by_id.get(can_id)
             return msg.name if msg else None
 
+    def lookup_decode(
+        self, can_id: int, data: bytes
+    ) -> Optional[tuple]:
+        """Combined lookup + decode in a single lock acquisition.
+
+        Returns (name, signals) if the CAN ID is in the DBC and decoding
+        succeeds, or None if the ID is unknown.  Avoids two separate
+        lock acquires when both name and signal values are needed.
+        """
+        with self._lock:
+            msg = self._msg_by_id.get(can_id)
+            if msg is None:
+                return None
+            try:
+                decoded = msg.decode(data, decode_choices=False)
+                out: List[DBCSignalValue] = []
+                for sig in msg.signals:
+                    val = decoded.get(sig.name)
+                    if val is None:
+                        continue
+                    out.append(DBCSignalValue(
+                        name=sig.name,
+                        value=float(val),
+                        unit=sig.unit or "",
+                        raw=0,
+                    ))
+                return (msg.name, out)
+            except Exception:
+                return None
+
     def decode(self, can_id: int, data: bytes) -> Optional[List[DBCSignalValue]]:
         """Decode a CAN frame. Returns a list of signal values or None."""
         with self._lock:
@@ -644,6 +712,20 @@ class DBCDatabase:
                 return out
             except Exception:
                 return None
+
+
+def _fmt_can_id(can_id: int, is_extended: bool) -> str:
+    """Format a CAN ID the CANalyzer way – no leading zeros.
+
+    Extended (29-bit): 0x prefix + hex digits without zero-padding.
+      e.g. 0x0EFF001A → '0xEFF001A'  (7 digits, not 8)
+           0x1FFFFFFF → '0x1FFFFFFF' (8 digits when genuinely needed)
+    Standard (11-bit): always 3 hex digits.
+      e.g. 0x111 → '0x111'
+    """
+    if is_extended:
+        return f"0x{can_id:X}"
+    return f"0x{can_id:03X}"
 
 
 def _format_signal_value(value: float) -> str:
@@ -676,84 +758,378 @@ def _format_signal_value(value: float) -> str:
 # ---------------------------------------------------------------------------
 # Theme definitions
 # ---------------------------------------------------------------------------
-THEMES: Dict[str, Dict[str, str]] = {
-    "midnight": {
-        "bg": "#000080", "fg": "#00ffff", "border": "#00ffff",
-        "title_bg": "#00aaaa", "title_fg": "#000000",
-        "accent": "#ffffff", "ok": "#00ff00", "err": "#ff5555",
-        "btn_bg": "#004488", "btn_fg": "#ffffff",
-        "log_bg": "#000060", "table_bg": "#000060",
-        "header_bg": "#00aaaa", "header_fg": "#000000",
-        "footer_bg": "#00aaaa", "footer_fg": "#000000",
-        "highlight": "#ffff00", "paused": "#ff8800",
-        "input_bg": "#001a4d",
-        "tab_active_bg": "#00aaaa", "tab_active_fg": "#000000",
-        "tab_inactive_bg": "#000060", "tab_inactive_fg": "#00ffff",
-        "load_low": "#00ff00", "load_mid": "#ffaa00", "load_high": "#ff5555",
-        "modal_bg": "#001a4d", "modal_border": "#00ffff",
-    },
-    "norton": {
-        "bg": "#0000aa", "fg": "#ffff55", "border": "#ffff55",
-        "title_bg": "#aa0000", "title_fg": "#ffffff",
-        "accent": "#ffffff", "ok": "#55ff55", "err": "#ff5555",
-        "btn_bg": "#555555", "btn_fg": "#ffffff",
-        "log_bg": "#000088", "table_bg": "#000088",
-        "header_bg": "#aa0000", "header_fg": "#ffffff",
-        "footer_bg": "#aa0000", "footer_fg": "#ffffff",
-        "highlight": "#ff5555", "paused": "#ff8800",
-        "input_bg": "#00006a",
-        "tab_active_bg": "#aa0000", "tab_active_fg": "#ffffff",
-        "tab_inactive_bg": "#000088", "tab_inactive_fg": "#ffff55",
-        "load_low": "#55ff55", "load_mid": "#ffaa00", "load_high": "#ff5555",
-        "modal_bg": "#00006a", "modal_border": "#ffff55",
-    },
-    "amber": {
-        "bg": "#1a1100", "fg": "#ffaa00", "border": "#ffaa00",
-        "title_bg": "#aa7700", "title_fg": "#000000",
-        "accent": "#ffcc00", "ok": "#ffcc00", "err": "#ff4400",
-        "btn_bg": "#443300", "btn_fg": "#ffaa00",
-        "log_bg": "#110a00", "table_bg": "#110a00",
-        "header_bg": "#aa7700", "header_fg": "#000000",
-        "footer_bg": "#aa7700", "footer_fg": "#000000",
-        "highlight": "#ff4400", "paused": "#ff8800",
-        "input_bg": "#2a1a00",
-        "tab_active_bg": "#aa7700", "tab_active_fg": "#000000",
-        "tab_inactive_bg": "#110a00", "tab_inactive_fg": "#ffaa00",
-        "load_low": "#ffcc00", "load_mid": "#ff8800", "load_high": "#ff4400",
-        "modal_bg": "#2a1a00", "modal_border": "#ffaa00",
-    },
-    "green": {
-        "bg": "#001a00", "fg": "#00ff00", "border": "#00ff00",
-        "title_bg": "#008800", "title_fg": "#000000",
-        "accent": "#00ff00", "ok": "#00ff00", "err": "#ff4444",
-        "btn_bg": "#003300", "btn_fg": "#00ff00",
-        "log_bg": "#001100", "table_bg": "#001100",
-        "header_bg": "#008800", "header_fg": "#000000",
-        "footer_bg": "#008800", "footer_fg": "#000000",
-        "highlight": "#ffff00", "paused": "#ff8800",
-        "input_bg": "#002200",
-        "tab_active_bg": "#008800", "tab_active_fg": "#000000",
-        "tab_inactive_bg": "#001100", "tab_inactive_fg": "#00ff00",
-        "load_low": "#00ff00", "load_mid": "#ffaa00", "load_high": "#ff4444",
-        "modal_bg": "#002200", "modal_border": "#00ff00",
-    },
-    "modern": {
-        "bg": "#1e1e2e", "fg": "#cdd6f4", "border": "#6c7086",
-        "title_bg": "#585b70", "title_fg": "#cdd6f4",
-        "accent": "#89b4fa", "ok": "#a6e3a1", "err": "#f38ba8",
-        "btn_bg": "#313244", "btn_fg": "#cdd6f4",
-        "log_bg": "#181825", "table_bg": "#181825",
-        "header_bg": "#585b70", "header_fg": "#cdd6f4",
-        "footer_bg": "#585b70", "footer_fg": "#cdd6f4",
-        "highlight": "#f9e2af", "paused": "#fab387",
-        "input_bg": "#11111b",
-        "tab_active_bg": "#585b70", "tab_active_fg": "#cdd6f4",
-        "tab_inactive_bg": "#181825", "tab_inactive_fg": "#6c7086",
-        "load_low": "#a6e3a1", "load_mid": "#f9e2af", "load_high": "#f38ba8",
-        "modal_bg": "#11111b", "modal_border": "#89b4fa",
-    },
-}
-THEME_NAMES: List[str] = ["midnight", "norton", "amber", "green", "modern"]
+MIDNIGHT = theme_midnight.THEME
+
+
+def _build_css(t: Dict[str, str]) -> str:
+    """Build all application CSS from a theme colour dictionary.
+
+    Every colour used anywhere in the UI is sourced from *t*.
+    Layout properties (width, height, padding, margin) are static.
+    """
+    return f"""
+Screen {{
+    layout: horizontal;
+    padding: 1;
+    background: {t["bg"]};
+    color: {t["fg"]};
+}}
+
+Header {{ background: {t["header_bg"]}; color: {t["header_fg"]}; }}
+Footer {{ dock: bottom; background: {t["footer_bg"]}; color: {t["footer_fg"]}; }}
+
+#left-col {{
+    width: 1fr;
+    height: 100%;
+    layout: vertical;
+}}
+
+#right-col {{
+    width: 90;
+    height: 100%;
+    layout: vertical;
+    margin-left: 1;
+}}
+
+ConnectionPanel {{
+    border: solid {t["border"]}; padding: 1;
+    height: auto; background: {t["bg"]}; color: {t["fg"]};
+    margin-bottom: 1;
+}}
+MonitorPanel {{
+    border: solid {t["border"]}; padding: 1;
+    height: 1fr; background: {t["bg"]};
+}}
+StatusPanel {{
+    border: solid {t["border"]}; padding: 1;
+    height: auto; background: {t["panel_dark_bg"]}; color: {t["fg"]};
+    margin-bottom: 1;
+}}
+SendPanel {{
+    border: solid {t["border"]}; padding: 1;
+    height: auto; background: {t["panel_dark_bg"]}; color: {t["fg"]};
+    margin-bottom: 1;
+}}
+FilterPanel {{
+    border: solid {t["border"]}; padding: 0 1;
+    height: auto; background: {t["bg"]}; color: {t["fg"]};
+}}
+
+.panel-title {{
+    text-style: bold; color: {t["title_fg"]}; background: {t["title_bg"]};
+    padding: 0 1; width: 100%; text-align: center; margin-bottom: 1;
+}}
+.form-row    {{ height: 3; align-vertical: middle; margin-bottom: 0; }}
+.filter-row  {{ height: 3; align-vertical: middle; }}
+.send-row    {{ height: 3; align-vertical: middle; margin-bottom: 0; }}
+
+.form-label    {{ width: 8; padding-top: 1; color: {t["accent"]}; }}
+.send-label    {{ width: 7; padding-top: 1; color: {t["accent"]}; }}
+.send-label-sm {{ width: 5; padding-top: 1; color: {t["accent"]}; }}
+.send-label-md {{ width: 8; padding-top: 1; color: {t["accent"]}; }}
+
+.button-row        {{ height: auto; margin-top: 1; align-horizontal: center; }}
+.button-row Button {{ margin: 0 1; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+
+.status-row        {{ height: auto; }}
+.status-row Static {{ width: 1fr; }}
+
+.status-disconnected {{
+    color: {t["err"]}; text-style: bold; text-align: center; margin-bottom: 1;
+}}
+.status-connected {{
+    color: {t["ok"]}; text-style: bold; text-align: center; margin-bottom: 1;
+}}
+
+#port-select       {{ width: 1fr; }}
+#speed-select      {{ width: 1fr; }}
+#mode-select       {{ width: 1fr; }}
+#frame-type-select {{ width: 1fr; }}
+
+Select {{
+    background: {t["select_bg"]};
+    color: {t["select_fg"]};
+}}
+Select:focus > SelectCurrent {{
+    border: tall {t["select_focus_border"]};
+}}
+Select > SelectCurrent {{
+    background: {t["select_current_bg"]};
+    color: {t["select_current_fg"]};
+}}
+Select > SelectCurrent > .select--arrow {{
+    color: {t["select_arrow"]};
+}}
+Select > SelectOverlay {{
+    background: {t["select_overlay_bg"]};
+    color: {t["select_overlay_fg"]};
+}}
+Select > SelectOverlay > OptionList {{
+    background: {t["select_overlay_bg"]};
+    color: {t["select_overlay_fg"]};
+}}
+Select > SelectOverlay > OptionList > .option-list--option-highlighted,
+Select > SelectOverlay > OptionList > .option-list--option-hover {{
+    background: {t["select_highlight_bg"]};
+    color: {t["select_highlight_fg"]};
+}}
+
+#btn-refresh      {{ width: auto; min-width: 13; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+
+#filter-input     {{ width: 1fr; background: {t["panel_dark_bg"]}; color: {t["fg"]}; }}
+#btn-filter-mode  {{ width: auto; min-width: 12; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+#btn-filter-clear {{ width: auto; min-width: 8;  background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+#btn-sort         {{ width: auto; min-width: 12; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+
+.send-input-id     {{ width: 16; background: {t["input_bg"]}; color: {t["fg"]}; }}
+.send-input-data   {{ width: 1fr; background: {t["input_bg"]}; color: {t["fg"]}; }}
+.send-input-period {{ width: 12; background: {t["input_bg"]}; color: {t["fg"]}; }}
+.send-input-name   {{ width: 1fr; background: {t["input_bg"]}; color: {t["fg"]}; }}
+.send-status       {{ height: 1; color: {t["ok"]}; text-align: center; }}
+
+#monitor-table {{ height: 1fr; background: {t["table_bg"]}; color: {t["fg"]}; }}
+
+#status-busload     {{ width: 1fr; }}
+#status-unique-ids  {{ width: 1fr; }}
+#status-busload-bar {{ width: 1fr; }}
+
+TabbedContent {{ height: 1fr; }}
+TabPane {{ padding: 1; background: {t["bg"]}; }}
+
+#event-log {{
+    height: 1fr;
+    background: {t["log_bg"]};
+    color: {t["fg"]};
+}}
+#stats-table {{
+    height: 1fr;
+    background: {t["table_bg"]};
+    color: {t["fg"]};
+}}
+.stats-summary {{
+    height: 3;
+    color: {t["fg"]};
+    padding: 0 1;
+    margin-top: 1;
+}}
+.dbc-placeholder {{
+    height: 1fr;
+    color: {t["dbc_placeholder"]};
+    text-align: center;
+    padding: 4 2;
+}}
+#dbc-status {{
+    height: 1;
+    color: {t["dbc_status"]};
+    padding: 0 1;
+    margin-bottom: 1;
+}}
+#dbc-msg-table {{
+    height: 1fr;
+    background: {t["table_bg"]};
+    color: {t["fg"]};
+}}
+.trace-state-idle      {{ color: {t["trace_idle"]};      text-style: bold; padding-left: 1; }}
+.trace-state-recording {{ color: {t["trace_recording"]}; text-style: bold; padding-left: 1; }}
+.trace-state-paused    {{ color: {t["trace_paused"]};    text-style: bold; padding-left: 1; }}
+.trace-warning    {{ color: {t["trace_warning"]};    text-style: bold; }}
+.trace-scroll-on  {{ color: {t["trace_scroll_on"]};  }}
+.trace-scroll-off {{ color: {t["trace_scroll_off"]}; }}
+#trace-table {{
+    height: 1fr;
+    background: {t["table_bg"]};
+    color: {t["fg"]};
+}}
+#trace-count   {{ color: {t["fg"]}; }}
+#trace-elapsed {{ color: {t["fg"]}; }}
+
+MonitorFullScreen {{
+    layout: horizontal;
+    padding: 1;
+    background: {t["bg"]};
+    color: {t["fg"]};
+}}
+#fs-left {{
+    width: 40; height: 100%; layout: vertical;
+    border: solid {t["border"]}; padding: 1; margin-right: 1;
+}}
+#fs-right {{
+    width: 1fr; height: 100%; layout: vertical;
+    border: solid {t["border"]}; padding: 1;
+}}
+.fs-title {{
+    text-style: bold; color: {t["title_fg"]}; background: {t["title_bg"]};
+    padding: 0 1; width: 100%; text-align: center; margin-bottom: 1;
+}}
+#fs-id-table {{
+    height: 1fr; background: {t["table_bg"]}; color: {t["fg"]};
+}}
+#fs-signal-table {{
+    height: 1fr; background: {t["table_bg"]}; color: {t["fg"]};
+}}
+#fs-hint {{
+    height: 1; color: {t["hint"]}; text-align: center; margin-top: 1;
+}}
+
+DiscoveryScreen {{
+    layout: vertical; padding: 0 1;
+    background: {t["bg"]}; color: {t["fg"]};
+}}
+#disc-control {{
+    height: auto; layout: vertical;
+    border: solid {t["border"]}; padding: 1; margin-bottom: 1;
+    background: {t["bg"]};
+}}
+#disc-control-title {{
+    text-style: bold; color: {t["title_fg"]}; background: {t["title_bg"]};
+    padding: 0 1; width: 100%; text-align: center; margin-bottom: 1;
+}}
+#disc-btn-row {{ height: 3; align-vertical: middle; margin-bottom: 1; }}
+#disc-btn-row Button {{ margin-right: 2; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+#disc-hint {{ height: 1; color: {t["hint"]}; }}
+#disc-results {{
+    height: 1fr; layout: vertical;
+    border: solid {t["border"]}; padding: 1;
+    background: {t["bg"]};
+}}
+#disc-results-title {{
+    text-style: bold; color: {t["title_fg"]}; background: {t["title_bg"]};
+    padding: 0 1; width: 100%; text-align: center; margin-bottom: 1;
+}}
+#disc-filter-row {{ height: 3; align-vertical: middle; margin-bottom: 1; }}
+#disc-filter-row Button {{ margin-right: 1; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+#disc-table {{
+    height: 1fr; background: {t["table_bg"]}; color: {t["fg"]};
+}}
+
+ShortcutsScreen {{ align: center middle; }}
+#shortcuts-dialog {{
+    width: 60; height: auto;
+    border: double {t["modal_border"]};
+    background: {t["modal_bg"]}; padding: 1 2;
+}}
+#shortcuts-title {{
+    text-style: bold; color: {t["title_fg"]}; background: {t["title_bg"]};
+    width: 100%; text-align: center; margin-bottom: 1;
+}}
+#shortcuts-table {{
+    height: auto; background: {t["modal_bg"]}; color: {t["fg"]};
+}}
+#shortcuts-close {{
+    margin-top: 1; width: 100%;
+    background: {t["btn_bg"]}; color: {t["btn_fg"]};
+}}
+
+DetailsScreen {{
+    layout: grid; grid-size: 1 1; padding: 1;
+    background: {t["bg"]}; color: {t["fg"]};
+}}
+StatisticsPanel {{ height: 1fr; layout: vertical; background: {t["bg"]}; }}
+DBCPanel {{ height: 1fr; layout: vertical; background: {t["bg"]}; }}
+TracePanel {{ height: 1fr; layout: vertical; background: {t["bg"]}; }}
+
+Input {{
+    background: {t["input_bg"]};
+    color: {t["fg"]};
+    border: tall {t["input_border"]};
+}}
+Input:focus {{
+    background: {t["input_focus_bg"]};
+    border: tall {t["input_focus_border"]};
+}}
+Input > .input--cursor {{
+    background: {t["input_cursor_bg"]};
+    color: {t["input_cursor_fg"]};
+}}
+Input > .input--placeholder {{
+    color: {t["input_placeholder"]};
+}}
+Button {{
+    background: {t["btn_bg"]};
+    color: {t["btn_fg"]};
+}}
+Button:hover {{
+    background: {t["btn_hover_bg"]};
+    color: {t["btn_hover_fg"]};
+}}
+Button:focus {{
+    background: {t["btn_focus_bg"]};
+    color: {t["btn_fg"]};
+    border: tall {t["btn_border"]};
+}}
+
+DataTable {{
+    background: {t["table_bg"]};
+    color: {t["fg"]};
+}}
+DataTable > .datatable--header {{
+    background: {t["table_header_bg"]};
+    color: {t["table_header_fg"]};
+    text-style: bold;
+}}
+DataTable > .datatable--cursor {{
+    background: {t["table_cursor_blur_bg"]};
+    color: {t["table_cursor_blur_fg"]};
+}}
+DataTable:focus > .datatable--cursor {{
+    background: {t["table_cursor_bg"]};
+    color: {t["table_cursor_fg"]};
+}}
+DataTable > .datatable--hover {{
+    background: {t["table_hover_bg"]};
+    color: {t["table_hover_fg"]};
+}}
+DataTable > .datatable--even-row {{
+    background: {t["table_even_bg"]};
+}}
+DataTable > .datatable--odd-row {{
+    background: {t["table_odd_bg"]};
+}}
+
+Tabs {{
+    background: {t["tab_bar_bg"]};
+}}
+Tabs > Tab {{
+    background: {t["tab_inactive_bg"]};
+    color: {t["tab_inactive_fg"]};
+}}
+Tabs > Tab:hover {{
+    background: {t["tab_hover_bg"]};
+    color: {t["tab_hover_fg"]};
+}}
+Tabs > Tab.-active {{
+    background: {t["tab_active_bg"]};
+    color: {t["tab_active_fg"]};
+}}
+Tabs > .tabs--content-tab {{
+    background: {t["tab_bar_bg"]};
+}}
+Tabs > .tabs--underline {{
+    color: {t["tab_underline"]};
+}}
+
+Scrollbar {{
+    background: {t["scrollbar_bg"]};
+}}
+ScrollBarThumb {{
+    background: {t["scrollbar_thumb_bg"]};
+}}
+ScrollBarThumb:hover {{
+    background: {t["scrollbar_thumb_hover_bg"]};
+}}
+
+.dbc-load-row {{ height: 3; align-vertical: middle; margin-bottom: 0; }}
+.dbc-load-row Input  {{ width: 1fr; background: {t["input_bg"]}; color: {t["fg"]}; }}
+.dbc-load-row Button {{ margin: 0 1; width: auto; min-width: 10; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+TracePanel {{ height: 1fr; layout: vertical; }}
+.trace-ctrl-row {{ height: 3; align-vertical: middle; margin-bottom: 0; }}
+.trace-ctrl-row Button {{ margin: 0 1; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+.trace-export-row {{ height: 3; align-vertical: middle; margin-bottom: 0; }}
+.trace-export-row Select {{ width: 1fr; background: {t["select_bg"]}; color: {t["select_fg"]}; }}
+.trace-export-row Button {{ margin: 0 1; width: auto; min-width: 12; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+.trace-info-row {{ height: 1; align-vertical: middle; margin-bottom: 1; }}
+.trace-info-row Static {{ width: 1fr; color: {t["fg"]}; }}
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -772,14 +1148,12 @@ SHORTCUTS_MAIN: List[Tuple[str, str]] = [
     ("Del", "Clear Monitor"),
     ("s", "Cycle Sort Mode"),
     ("f", "Focus Filter Input"),
-    ("t", "Cycle Theme"),
     ("q", "Quit"),
 ]
 
 SHORTCUTS_DETAILS: List[Tuple[str, str]] = [
     ("Details Screen", ""),
     ("Esc / q", "Back to Main"),
-    ("t", "Cycle Theme"),
     ("", ""),
     ("DBC Decoder tab", ""),
     ("Load button / Enter", "Load .dbc file from path input"),
@@ -797,70 +1171,35 @@ SHORTCUTS_FULLSCREEN: List[Tuple[str, str]] = [
     ("Fullscreen Monitor", ""),
     ("Esc / q", "Back to Main"),
     ("Left click", "Toggle ID selection"),
-    ("t", "Cycle Theme"),
     ("F1", "Help"),
 ]
 
 SHORTCUTS_DISCOVERY: List[Tuple[str, str]] = [
     ("Signal Discovery  (F7)", ""),
     ("Esc / q", "Back to Main"),
-    ("o", "Observe Start  (Noise-Baseline aufbauen)"),
-    ("c", "Capture Start  (IDLE, OBSERVING oder RESULTS)"),
+    ("o", "Observe Start  (build noise baseline)"),
+    ("c", "Capture Start  (IDLE, OBSERVING or RESULTS)"),
     ("x", "Capture Stop   (CAPTURING)"),
     ("s", "Cycle sort: ID → Δ-Bytes → Status"),
     ("u", "Toggle filter: All ↔ Unknown only"),
-    ("t", "Cycle Theme"),
     ("F1", "Help"),
     ("", ""),
-    ("Workflow mit Noise-Filter", ""),
-    ("1.", "[o] Observe Start – Bus beobachten"),
-    ("2.", "Warten bis Noise-IDs erkannt (Header zeigt Anzahl)"),
-    ("3.", "[c] Capture Start – Snapshot 1 wird gezogen"),
-    ("4.", "Aktion durchführen (Tür, Knopf, …)"),
-    ("5.", "[x] Capture Stop – Ergebnisse ohne Noise-IDs"),
+    ("Workflow with Noise-Filter", ""),
+    ("1.", "[o] Observe Start – monitor bus activity"),
+    ("2.", "Wait until noise IDs detected (header shows count)"),
+    ("3.", "[c] Capture Start – Snapshot 1 is taken"),
+    ("4.", "Perform action (door, button, …)"),
+    ("5.", "[x] Capture Stop – results without noise IDs"),
     ("", ""),
-    ("Schnell-Workflow (ohne Noise-Filter)", ""),
-    ("1.", "[c] direkt drücken → Aktion → [x] Stop"),
+    ("Quick Workflow (without Noise-Filter)", ""),
+    ("1.", "[c] press directly → action → [x] Stop"),
 ]
-
-SHORTCUTS_CSS = """
-ShortcutsScreen {
-    align: center middle;
-}
-#shortcuts-dialog {
-    width: 60;
-    height: auto;
-    border: double #00ffff;
-    background: #001a4d;
-    padding: 1 2;
-}
-#shortcuts-title {
-    text-style: bold;
-    color: #000000;
-    background: #00aaaa;
-    width: 100%;
-    text-align: center;
-    margin-bottom: 1;
-}
-#shortcuts-table {
-    height: auto;
-    background: #001a4d;
-    color: #00ffff;
-}
-#shortcuts-close {
-    margin-top: 1;
-    width: 100%;
-    background: #004488;
-    color: #ffffff;
-}
-"""
 
 
 class ShortcutsScreen(ModalScreen):
     """Modal overlay displaying context-sensitive keyboard shortcuts."""
 
-    BINDINGS = [("escape", "dismiss", "Close"), ("f1", "dismiss", "Close")]
-    CSS = SHORTCUTS_CSS
+    BINDINGS = [("escape", "dismiss", "Close")]
 
     def __init__(self, context: str = "main", **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -904,36 +1243,7 @@ class ShortcutsScreen(ModalScreen):
         if event.button.id == "shortcuts-close":
             self.dismiss()
 
-    def apply_theme(self, t: Dict[str, str]) -> None:
-        """Apply a theme colour dict to all styled elements of this modal."""
-        try:
-            dlg = self.query_one("#shortcuts-dialog")
-            dlg.styles.background = t["modal_bg"]
-            dlg.styles.border = ("double", t["modal_border"])
-        except Exception:
-            pass
-        try:
-            self.query_one("#shortcuts-title").styles.background = t["title_bg"]
-            self.query_one("#shortcuts-title").styles.color = t["title_fg"]
-        except Exception:
-            pass
-        try:
-            tbl = self.query_one("#shortcuts-table", DataTable)
-            tbl.styles.background = t["modal_bg"]
-            tbl.styles.color = t["fg"]
-        except Exception:
-            pass
-        try:
-            btn = self.query_one("#shortcuts-close", Button)
-            btn.styles.background = t["btn_bg"]
-            btn.styles.color = t["btn_fg"]
-        except Exception:
-            pass
 
-
-# ---------------------------------------------------------------------------
-# Reusable panel widgets
-# ---------------------------------------------------------------------------
 class ConnectionPanel(Container):
     """Panel holding port, speed, mode selectors and Connect/Disconnect buttons."""
 
@@ -1036,22 +1346,24 @@ class SendPanel(Container):
     def compose(self) -> ComposeResult:
         """Build the transmit panel layout."""
         yield Static("TRANSMIT", classes="panel-title")
+        # Row 1: ID | Ext | Period | Name
         with Horizontal(classes="send-row"):
             yield Label("ID:", classes="send-label")
-            yield Input(placeholder="0x123", id="send-id", classes="send-input-id")
+            yield Input(placeholder="0x1FFFFFFF", id="send-id",
+                        classes="send-input-id")
             yield Label("Ext", classes="send-label-sm")
             yield Checkbox("", id="send-extended", value=True)
-        with Horizontal(classes="send-row"):
-            yield Label("Data:", classes="send-label")
-            yield Input(placeholder="DE AD BE EF  (hex bytes)", id="send-data",
-                        classes="send-input-data")
-        with Horizontal(classes="send-row"):
-            yield Label("Period:", classes="send-label")
-            yield Input(placeholder="100  (ms, 0 = single shot)", id="send-period",
+            yield Label("Period:", classes="send-label-md")
+            yield Input(placeholder="ms (0=single)", id="send-period",
                         classes="send-input-period")
             yield Label("Name:", classes="send-label-sm")
             yield Input(placeholder="task1", id="send-name",
                         classes="send-input-name")
+        # Row 2: Data bytes (full width)
+        with Horizontal(classes="send-row"):
+            yield Label("Data:", classes="send-label")
+            yield Input(placeholder="DE AD BE EF  (hex bytes)", id="send-data",
+                        classes="send-input-data")
         with Horizontal(classes="button-row"):
             yield Button("Send", id="btn-send", variant="success")
             yield Button("Start Cyclic", id="btn-cyclic-start", variant="default")
@@ -1181,137 +1493,6 @@ class DBCPanel(Container):
         self._selected_ids: Set[int] = set()
 
 
-# ---------------------------------------------------------------------------
-# Details screen CSS
-# ---------------------------------------------------------------------------
-DETAILS_CSS = """
-Screen {
-    layout: grid;
-    grid-size: 1 1;
-    padding: 1;
-    background: #000080;
-    color: #00ffff;
-}
-
-Header { background: #00aaaa; color: #000000; }
-Footer { dock: bottom; background: #00aaaa; color: #000000; }
-
-TabbedContent { height: 1fr; }
-
-TabPane {
-    padding: 1;
-    background: #000080;
-}
-
-.panel-title {
-    text-style: bold;
-    color: #000000;
-    background: #00aaaa;
-    padding: 0 1;
-    width: 100%;
-    text-align: center;
-    margin-bottom: 1;
-}
-
-#event-log {
-    height: 1fr;
-    background: #000060;
-    color: #00ffff;
-}
-
-#stats-table {
-    height: 1fr;
-    background: #000060;
-    color: #00ffff;
-}
-
-.stats-summary {
-    height: 3;
-    color: #00ffff;
-    padding: 0 1;
-    margin-top: 1;
-}
-
-.dbc-placeholder {
-    height: 1fr;
-    color: #00aaaa;
-    text-align: center;
-    padding: 4 2;
-}
-
-/* ---- DBC tab ---- */
-DBCPanel {
-    height: 1fr;
-    layout: vertical;
-}
-
-.dbc-load-row {
-    height: 3;
-    align-vertical: middle;
-    margin-bottom: 0;
-}
-.dbc-load-row Input  { width: 1fr; }
-.dbc-load-row Button { margin: 0 1; width: auto; min-width: 10; }
-
-#dbc-status {
-    height: 1;
-    color: #00ffff;
-    padding: 0 1;
-    margin-bottom: 1;
-}
-
-#dbc-msg-table {
-    height: 1fr;
-    background: #000060;
-    color: #00ffff;
-}
-
-/* ---- Trace tab ---- */
-TracePanel {
-    height: 1fr;
-    layout: vertical;
-}
-
-.trace-ctrl-row {
-    height: 3;
-    align-vertical: middle;
-    margin-bottom: 0;
-}
-.trace-ctrl-row Button { margin: 0 1; }
-
-.trace-export-row {
-    height: 3;
-    align-vertical: middle;
-    margin-bottom: 0;
-}
-.trace-export-row Select { width: 1fr; }
-.trace-export-row Button { margin: 0 1; width: auto; min-width: 12; }
-
-.trace-info-row {
-    height: 1;
-    align-vertical: middle;
-    margin-bottom: 1;
-}
-.trace-info-row Static { width: 1fr; }
-
-.trace-state-idle      { color: #888888; text-style: bold; padding-left: 1; }
-.trace-state-recording { color: #ff4444; text-style: bold; padding-left: 1; }
-.trace-state-paused    { color: #ffaa00; text-style: bold; padding-left: 1; }
-
-.trace-warning    { color: #ff4444; text-style: bold; }
-.trace-scroll-on  { color: #00ff00; }
-.trace-scroll-off { color: #ff8800; }
-
-#trace-table {
-    height: 1fr;
-    background: #000060;
-    color: #00ffff;
-}
-#trace-count   { color: #00ffff; }
-#trace-elapsed { color: #00ffff; }
-"""
-
-
 class DetailsScreen(Screen):
     """Secondary screen with TabbedContent: Event Log, Statistics, DBC, Trace."""
 
@@ -1319,10 +1500,7 @@ class DetailsScreen(Screen):
     BINDINGS = [
         ("escape", "pop_screen", "Back to Main"),
         ("q", "pop_screen", "Back"),
-        ("t", "cycle_theme", "Theme"),
-        ("f1", "show_shortcuts", "Help"),
     ]
-    CSS = DETAILS_CSS
 
     def compose(self) -> ComposeResult:
         """Build the details screen layout."""
@@ -1339,78 +1517,6 @@ class DetailsScreen(Screen):
                 yield TracePanel()
         yield Footer()
 
-    def apply_theme(self, t: Dict[str, str]) -> None:
-        """Apply a theme colour dict to all styled elements of this screen."""
-        self.screen.styles.background = t["bg"]
-        try:
-            self.query_one(Header).styles.background = t["header_bg"]
-            self.query_one(Header).styles.color = t["header_fg"]
-            self.query_one(Footer).styles.background = t["footer_bg"]
-            self.query_one(Footer).styles.color = t["footer_fg"]
-        except Exception:
-            pass  # Header/Footer not yet mounted - intentional
-        try:
-            self.query_one(TabbedContent).styles.background = t["bg"]
-        except Exception:
-            pass
-        for pane in self.query(TabPane):
-            pane.styles.background = t["bg"]
-        for el in self.query(".panel-title"):
-            el.styles.background = t["title_bg"]
-            el.styles.color = t["title_fg"]
-        try:
-            log = self.query_one("#event-log", Log)
-            log.styles.background = t["log_bg"]
-            log.styles.color = t["fg"]
-        except Exception:
-            pass
-        try:
-            st = self.query_one("#stats-table", DataTable)
-            st.styles.background = t["table_bg"]
-            st.styles.color = t["fg"]
-        except Exception:
-            pass
-        for wid_id in ("#stats-summary",):
-            try:
-                w = self.query_one(wid_id)
-                w.styles.color = t["fg"]
-                w.styles.background = t["bg"]
-            except Exception:
-                pass
-        # DBC panel
-        try:
-            self.query_one(DBCPanel).styles.background = t["bg"]
-        except Exception:
-            pass
-        for wid_id in ("#dbc-status", "#dbc-path-input"):
-            try:
-                w = self.query_one(wid_id)
-                w.styles.color = t["fg"]
-                w.styles.background = t["bg"]
-            except Exception:
-                pass
-        for wid_id in ("#dbc-msg-table",):
-            try:
-                w = self.query_one(wid_id, DataTable)
-                w.styles.background = t["table_bg"]
-                w.styles.color = t["fg"]
-            except Exception:
-                pass
-        try:
-            self.query_one(TracePanel).styles.background = t["bg"]
-        except Exception:
-            pass
-        try:
-            tt = self.query_one("#trace-table", DataTable)
-            tt.styles.background = t["table_bg"]
-            tt.styles.color = t["fg"]
-        except Exception:
-            pass
-        for wid_id in ("#trace-count", "#trace-elapsed"):
-            try:
-                self.query_one(wid_id).styles.color = t["fg"]
-            except Exception:
-                pass
 
     def action_pop_screen(self) -> None:
         """Return to the main screen, resume paused timers and clear details ref."""
@@ -1421,77 +1527,15 @@ class DetailsScreen(Screen):
             app._monitor_timer.resume()
         if app._status_timer:
             app._status_timer.resume()
+        if app._stats_timer:
+            app._stats_timer.resume()
+        # _trace_timer was never paused for Details - no resume needed
         app.pop_screen()
 
-    def action_cycle_theme(self) -> None:
-        """Delegate theme cycling to the main app while Details is active."""
-        self.app.action_cycle_theme()  # type: ignore[attr-defined]
 
     def action_show_shortcuts(self) -> None:
         """Delegate shortcut overlay to the main app with details context."""
         self.app.action_show_shortcuts(context="details")  # type: ignore[attr-defined]
-
-
-# ---------------------------------------------------------------------------
-# Monitor Fullscreen CSS + Screen
-# ---------------------------------------------------------------------------
-MONITOR_FULLSCREEN_CSS = """
-MonitorFullScreen {
-    layout: horizontal;
-    padding: 1;
-    background: #000080;
-    color: #00ffff;
-}
-
-Header { background: #00aaaa; color: #000000; }
-Footer { dock: bottom; background: #00aaaa; color: #000000; }
-
-#fs-left {
-    width: 40;
-    height: 100%;
-    layout: vertical;
-    border: solid #00ffff;
-    padding: 1;
-    margin-right: 1;
-}
-
-#fs-right {
-    width: 1fr;
-    height: 100%;
-    layout: vertical;
-    border: solid #00ffff;
-    padding: 1;
-}
-
-.fs-title {
-    text-style: bold;
-    color: #000000;
-    background: #00aaaa;
-    padding: 0 1;
-    width: 100%;
-    text-align: center;
-    margin-bottom: 1;
-}
-
-#fs-id-table {
-    height: 1fr;
-    background: #000060;
-    color: #00ffff;
-}
-
-#fs-signal-table {
-    height: 1fr;
-    background: #000060;
-    color: #00ffff;
-}
-
-#fs-hint {
-    height: 1;
-    color: #888888;
-    text-align: center;
-    margin-top: 1;
-}
-"""
 
 
 class MonitorFullScreen(Screen):
@@ -1500,10 +1544,7 @@ class MonitorFullScreen(Screen):
     BINDINGS = [
         ("escape", "pop_screen", "Back"),
         ("q", "pop_screen", "Back"),
-        ("t", "cycle_theme", "Theme"),
-        ("f1", "show_shortcuts", "Help"),
     ]
-    CSS = MONITOR_FULLSCREEN_CSS
 
     # Column definitions
     ID_COLS: Tuple[str, ...] = ("Sel", "CAN-ID", "Name", "Rate Hz", "Count")
@@ -1523,7 +1564,7 @@ class MonitorFullScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Initialise tables."""
+        """Initialise tables and cache column key lists."""
         id_tbl = self.query_one("#fs-id-table", DataTable)
         id_tbl.add_columns(*self.ID_COLS)
         id_tbl.cursor_type = "row"
@@ -1532,13 +1573,16 @@ class MonitorFullScreen(Screen):
         sig_tbl = self.query_one("#fs-signal-table", DataTable)
         sig_tbl.add_columns(*self.SIG_COLS)
 
+        # Cache column key lists – columns never change after mount
+        self._id_col_keys: list = list(id_tbl.columns)
+        self._sig_col_keys: list = list(sig_tbl.columns)
+
         self._selected_ids: Set[int] = set()
         self._id_row_keys: Dict[int, str] = {}   # can_id → row_key string
 
         # References injected by the main app after push
         self._store: Optional[CANFrameStore] = None
         self._dbc: Optional[DBCDatabase] = None
-        self._theme_idx: int = 0
 
         self._refresh_timer = self.set_interval(TIMER_DBC_S, self._refresh_tables)
 
@@ -1550,7 +1594,7 @@ class MonitorFullScreen(Screen):
         if self._store is None:
             return
         rows = self._store.read()
-        t = THEMES[THEME_NAMES[self._theme_idx]]
+        t = MIDNIGHT
         fg = t["fg"]
         highlight = t["highlight"]
         self._refresh_id_table(rows, fg, highlight)
@@ -1571,7 +1615,7 @@ class MonitorFullScreen(Screen):
             rate = (count - 1) / elapsed if elapsed > 0 and count > 1 else 0.0
 
             id_str = (
-                f"0x{can_id:08X}" if frame.is_extended else f"0x{can_id:03X}"
+                _fmt_can_id(can_id, frame.is_extended)
             )
             sel_str = "[X]" if can_id in self._selected_ids else "[ ]"
             sel_color = highlight if can_id in self._selected_ids else fg
@@ -1591,7 +1635,7 @@ class MonitorFullScreen(Screen):
                 )
                 self._id_row_keys[can_id] = row_key
             else:
-                col_keys = list(id_tbl.columns)
+                col_keys = self._id_col_keys
                 id_tbl.update_cell(row_key, col_keys[0],
                                    Text(sel_str, style=sel_color),
                                    update_width=False)
@@ -1619,11 +1663,14 @@ class MonitorFullScreen(Screen):
                 continue
             frame = e["frame"]
             id_str = (
-                f"0x{can_id:08X}" if frame.is_extended else f"0x{can_id:03X}"
+                _fmt_can_id(can_id, frame.is_extended)
             )
             decoded_signals: Optional[List[DBCSignalValue]] = None
+            msg_name_fallback = ""
             if self._dbc is not None and self._dbc.loaded:
-                decoded_signals = self._dbc.decode(can_id, bytes(frame.data))
+                result = self._dbc.lookup_decode(can_id, bytes(frame.data))
+                if result is not None:
+                    msg_name_fallback, decoded_signals = result
 
             if decoded_signals:
                 for sig in decoded_signals:
@@ -1635,15 +1682,12 @@ class MonitorFullScreen(Screen):
                         sig.unit,
                     ))
             else:
-                # Raw hex fallback
+                # Raw hex fallback – msg_name already resolved by lookup_decode above
                 hex_str = bytes(frame.data).hex(" ").upper()
-                msg_name = ""
-                if self._dbc is not None and self._dbc.loaded:
-                    msg_name = self._dbc.lookup_name(can_id) or "(not in DBC)"
                 new_rows.append((
                     f"{can_id}_raw",
                     id_str,
-                    msg_name,
+                    msg_name_fallback or "(not in DBC)" if (self._dbc and self._dbc.loaded) else "",
                     "raw",
                     hex_str,
                     "",
@@ -1658,7 +1702,7 @@ class MonitorFullScreen(Screen):
             except Exception:
                 pass
 
-        col_keys = list(sig_tbl.columns)
+        col_keys = self._sig_col_keys
         for row_key, id_str, msg_name, sig_name, val_str, unit in new_rows:
             if row_key in existing_keys:
                 sig_tbl.update_cell(row_key, col_keys[3],
@@ -1724,34 +1768,6 @@ class MonitorFullScreen(Screen):
         # Force immediate visual refresh
         self._refresh_tables()
 
-    def apply_theme(self, t: Dict[str, str]) -> None:
-        """Apply theme colours to this screen."""
-        try:
-            self.screen.styles.background = t["bg"]
-            self.screen.styles.color = t["fg"]
-            self.query_one(Header).styles.background = t["header_bg"]
-            self.query_one(Header).styles.color = t["header_fg"]
-            self.query_one(Footer).styles.background = t["footer_bg"]
-            self.query_one(Footer).styles.color = t["footer_fg"]
-        except Exception:
-            pass
-        for wid_id in ("#fs-left", "#fs-right"):
-            try:
-                w = self.query_one(wid_id)
-                w.styles.background = t["bg"]
-                w.styles.border = ("solid", t["border"])
-            except Exception:
-                pass
-        for el in self.query(".fs-title"):
-            el.styles.background = t["title_bg"]
-            el.styles.color = t["title_fg"]
-        for wid_id in ("#fs-id-table", "#fs-signal-table"):
-            try:
-                w = self.query_one(wid_id, DataTable)
-                w.styles.background = t["table_bg"]
-                w.styles.color = t["fg"]
-            except Exception:
-                pass
 
     def action_pop_screen(self) -> None:
         """Return to main screen, resume paused timers."""
@@ -1762,103 +1778,20 @@ class MonitorFullScreen(Screen):
             app._monitor_timer.resume()
         if app._status_timer:
             app._status_timer.resume()
+        if app._stats_timer:
+            app._stats_timer.resume()
+        # _trace_timer was never paused - no resume needed
         app.pop_screen()
 
-    def action_cycle_theme(self) -> None:
-        """Delegate theme cycling to the main app."""
-        self.app.action_cycle_theme()  # type: ignore[attr-defined]
 
     def action_show_shortcuts(self) -> None:
         """Delegate shortcut overlay to the main app with fullscreen context."""
         self.app.action_show_shortcuts(context="fullscreen")  # type: ignore[attr-defined]
 
 
-# ---------------------------------------------------------------------------
-# Signal Discovery Screen CSS + Screen
-# ---------------------------------------------------------------------------
-DISCOVERY_CSS = """
-DiscoveryScreen {
-    layout: vertical;
-    padding: 0 1;
-    background: #000080;
-    color: #00ffff;
-}
-
-Header { background: #00aaaa; color: #000000; }
-Footer { dock: bottom; background: #00aaaa; color: #000000; }
-
-#disc-control {
-    height: auto;
-    layout: vertical;
-    border: solid #00ffff;
-    padding: 1;
-    margin-bottom: 1;
-    background: #000080;
-}
-
-#disc-control-title {
-    text-style: bold;
-    color: #000000;
-    background: #00aaaa;
-    padding: 0 1;
-    width: 100%;
-    text-align: center;
-    margin-bottom: 1;
-}
-
-#disc-btn-row {
-    height: 3;
-    align-vertical: middle;
-    margin-bottom: 1;
-}
-
-#disc-btn-row Button {
-    margin-right: 2;
-}
-
-#disc-hint {
-    height: 1;
-    color: #888888;
-}
-
-#disc-results {
-    height: 1fr;
-    layout: vertical;
-    border: solid #00ffff;
-    padding: 1;
-    background: #000080;
-}
-
-#disc-results-title {
-    text-style: bold;
-    color: #000000;
-    background: #00aaaa;
-    padding: 0 1;
-    width: 100%;
-    text-align: center;
-    margin-bottom: 1;
-}
-
-#disc-filter-row {
-    height: 3;
-    align-vertical: middle;
-    margin-bottom: 1;
-}
-
-#disc-filter-row Button {
-    margin-right: 1;
-}
-
-#disc-table {
-    height: 1fr;
-    background: #000060;
-    color: #00ffff;
-}
-"""
-
 # Discovery table column definitions
 _DISC_COLS: Tuple[str, ...] = (
-    "CAN-ID", "Status", "Δ Bytes", "VORHER", "NACHHER"
+    "CAN-ID", "Status", "Δ Bytes", "BEFORE", "AFTER"
 )
 
 # Sort modes for the discovery table: (label, key, reverse)
@@ -1875,15 +1808,12 @@ class DiscoveryScreen(Screen):
     BINDINGS = [
         ("escape", "pop_screen", "Back"),
         ("q", "pop_screen", "Back"),
-        ("o", "observe_start", "o Observe"),
-        ("c", "capture_start", "c Capture"),
-        ("x", "capture_stop", "x Stop"),
-        ("s", "cycle_sort", "s Sort"),
-        ("u", "toggle_unknown_filter", "u Unknown only"),
-        ("t", "cycle_theme", "t Theme"),
-        ("f1", "show_shortcuts", "F1 Help"),
+        ("o", "observe_start", "Observe"),
+        ("c", "capture_start", "Capture"),
+        ("x", "capture_stop", "Stop"),
+        ("s", "cycle_sort", "Sort"),
+        ("u", "toggle_unknown_filter", "Unknown only"),
     ]
-    CSS = DISCOVERY_CSS
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -1891,7 +1821,6 @@ class DiscoveryScreen(Screen):
         # Shared references injected by the main app after push_screen
         self._store: Optional[CANFrameStore] = None
         self._dbc: Optional[DBCDatabase] = None
-        self._theme_idx: int = 0
 
         # Discovery state machine
         self._disc_state: DiscoveryState = DiscoveryState.IDLE
@@ -1943,24 +1872,25 @@ class DiscoveryScreen(Screen):
                     disabled=True,
                 )
             yield Static(
-                "Tipp: [o] Observe (Noise lernen) → [c] Capture → Aktion → [x] Stop",
+                "Tip: [o] Observe (learn noise) → [c] Capture → action → [x] Stop",
                 id="disc-hint",
             )
 
         with Container(id="disc-results"):
-            yield Static("ERGEBNISSE", id="disc-results-title")
+            yield Static("RESULTS", id="disc-results-title")
             with Horizontal(id="disc-filter-row"):
                 yield Button("Sort: ID ↑", id="btn-disc-sort", variant="default")
-                yield Button("Alle", id="btn-disc-filter", variant="default")
+                yield Button("All", id="btn-disc-filter", variant="default")
             yield DataTable(id="disc-table", show_cursor=True)
 
         yield Footer()
 
     def on_mount(self) -> None:
-        """Initialise the results table columns."""
+        """Initialise the results table columns and set initial focus."""
         tbl = self.query_one("#disc-table", DataTable)
         tbl.add_columns(*_DISC_COLS)
         self._set_header_idle()
+        tbl.focus()
 
     # -----------------------------------------------------------------------
     # Header helpers
@@ -1968,15 +1898,15 @@ class DiscoveryScreen(Screen):
     def _set_header_idle(self) -> None:
         """Set the app sub_title for the IDLE state."""
         self.app.sub_title = (  # type: ignore[attr-defined]
-            "Signal Discovery  –  [o] Observe (Noise), dann [c] Capture starten."
+            "Signal Discovery  –  [o] Observe (noise), then [c] Capture."
         )
 
     def _set_header_observing(self, noise: int) -> None:
         """Set the app sub_title for the OBSERVING state with live noise counter."""
         dot = "\u25cf" if self._blink_state else "\u25cb"  # ● / ○
         self.app.sub_title = (  # type: ignore[attr-defined]
-            f"{dot} OBSERVING...  Noise erkannt: {noise} IDs  │  "
-            "[c] drücken um Capture zu starten"
+            f"{dot} OBSERVING...  Noise detected: {noise} IDs  │  "
+            "[c] press to start Capture"
         )
 
     def _set_header_capturing(self, baseline: int, delta: int) -> None:
@@ -1985,28 +1915,28 @@ class DiscoveryScreen(Screen):
         noise_str = f"  │  Noise-Filter: {len(self._noise_ids)} IDs" if self._noise_ids else ""
         self.app.sub_title = (  # type: ignore[attr-defined]
             f"{dot} CAPTURING...  Baseline: {baseline} IDs  │  "
-            f"Δ seit Start: {delta} IDs geändert{noise_str}"
+            f"Δ since start: {delta} IDs changed{noise_str}"
         )
 
     def _set_header_results(self, changed: int, unknown: int, filtered: int) -> None:
         """Set the app sub_title for the RESULTS state."""
-        noise_str = f"  │  {filtered} Noise gefiltert" if filtered > 0 else ""
+        noise_str = f"  │  {filtered} noise filtered" if filtered > 0 else ""
         if changed == 0:
             if filtered > 0:
                 self.app.sub_title = (  # type: ignore[attr-defined]
-                    f"Signal Discovery  –  ⓘ Alle Änderungen waren Noise ({filtered} IDs). "
-                    "[o] Observe verkürzen oder [c] ohne Observe starten."
+                    f"Signal Discovery  –  ⓘ All changes were noise ({filtered} IDs). "
+                    "[o] shorten Observe or [c] start without Observe."
                 )
             else:
                 self.app.sub_title = (  # type: ignore[attr-defined]
-                    "Signal Discovery  –  ⓘ Keine Änderungen gefunden.  "
-                    "[c] für neuen Capture."
+                    "Signal Discovery  –  ⓘ No changes found.  "
+                    "[c] for new Capture."
                 )
         else:
             self.app.sub_title = (  # type: ignore[attr-defined]
-                f"Signal Discovery  –  ✓ Fertig.  "
-                f"{changed} geändert  │  {unknown} unbekannt"
-                f"{noise_str}  │  [c] für neuen Capture."
+                f"Signal Discovery  –  ✓ Done.  "
+                f"{changed} changed  │  {unknown} unknown"
+                f"{noise_str}  │  [c] for new Capture."
             )
 
     # -----------------------------------------------------------------------
@@ -2025,21 +1955,21 @@ class DiscoveryScreen(Screen):
             return  # already observing
         if self._store is None:
             self.app.sub_title = (  # type: ignore[attr-defined]
-                "Signal Discovery  –  ⚠ Kein Store verfügbar."
+                "Signal Discovery  –  ⚠ No store available."
             )
             return
 
         snap = self._store.read()
         if not snap:
             self.app.sub_title = (  # type: ignore[attr-defined]
-                "Signal Discovery  –  ⚠ Keine Frames im Monitor – "
-                "erst verbinden und Frames empfangen."
+                "Signal Discovery  –  ⚠ No frames in monitor – "
+                "connect first and receive frames."
             )
             return
 
         # Reset noise state and take observe baseline snapshot
         self._noise_ids = set()
-        self._observe_snap = {cid: dict(e)["frame"].data for cid, e in snap.items()}
+        self._observe_snap = {cid: e["frame"].data for cid, e in snap.items()}
 
         # Clear results table (new session starting)
         tbl = self.query_one("#disc-table", DataTable)
@@ -2070,7 +2000,7 @@ class DiscoveryScreen(Screen):
             return
         if self._store is None:
             self.app.sub_title = (  # type: ignore[attr-defined]
-                "Signal Discovery  –  ⚠ Kein Store verfügbar."
+                "Signal Discovery  –  ⚠ No store available."
             )
             return
 
@@ -2088,14 +2018,14 @@ class DiscoveryScreen(Screen):
         snap = self._store.read()
         if not snap:
             self.app.sub_title = (  # type: ignore[attr-defined]
-                "Signal Discovery  –  ⚠ Keine Frames im Monitor – "
-                "erst verbinden und Frames empfangen."
+                "Signal Discovery  –  ⚠ No frames in monitor – "
+                "connect first and receive frames."
             )
             return
 
         # Take Snapshot 1
-        self._snap1 = {cid: dict(e)["frame"].data for cid, e in snap.items()}
-        self._snap1_ext = {cid: dict(e)["frame"].is_extended for cid, e in snap.items()}
+        self._snap1 = {cid: e["frame"].data for cid, e in snap.items()}
+        self._snap1_ext = {cid: e["frame"].is_extended for cid, e in snap.items()}
         self._snap2 = {}
         self._snap2_ext = {}
         self._results = []
@@ -2131,9 +2061,9 @@ class DiscoveryScreen(Screen):
 
         # Take Snapshot 2
         snap2 = self._store.read()
-        self._snap2 = {cid: dict(e)["frame"].data for cid, e in snap2.items()}
+        self._snap2 = {cid: e["frame"].data for cid, e in snap2.items()}
         self._snap2_ext = {
-            cid: dict(e)["frame"].is_extended for cid, e in snap2.items()
+            cid: e["frame"].is_extended for cid, e in snap2.items()
         }
 
         # Compute deltas (noise IDs are filtered inside _compute_deltas)
@@ -2158,8 +2088,8 @@ class DiscoveryScreen(Screen):
         # Warn if store was cleared during capture
         if self._cleared_during_capture:
             self.app.sub_title = (  # type: ignore[attr-defined]
-                "Signal Discovery  –  ⚠ Monitor wurde während Capture geleert – "
-                "Ergebnisse möglicherweise unvollständig."
+                "Signal Discovery  –  ⚠ Monitor was cleared during Capture – "
+                "results may be incomplete."
             )
 
     def _tick_observe(self) -> None:
@@ -2170,8 +2100,7 @@ class DiscoveryScreen(Screen):
 
         current = self._store.read()
         for cid, entry in current.items():
-            data_now = dict(entry)["frame"].data
-            # A CAN-ID is noise if it changed since observe start OR appeared new
+            data_now = entry["frame"].data
             if cid not in self._observe_snap or data_now != self._observe_snap[cid]:
                 self._noise_ids.add(cid)
                 # Update observe baseline so continued change is tracked correctly
@@ -2188,7 +2117,7 @@ class DiscoveryScreen(Screen):
         current = self._store.read()
         delta = 0
         for cid, entry in current.items():
-            data_now = dict(entry)["frame"].data
+            data_now = entry["frame"].data
             if cid not in self._snap1:
                 delta += 1  # new frame appeared
             elif data_now != self._snap1[cid]:
@@ -2267,12 +2196,9 @@ class DiscoveryScreen(Screen):
             if self._unknown_only and delta.dbc_name is not None:
                 continue
 
-            id_str = (
-                f"0x{delta.can_id:08X}" if delta.is_extended
-                else f"0x{delta.can_id:03X}"
-            )
+            id_str = _fmt_can_id(delta.can_id, delta.is_extended)
             status_str = (
-                f"✓ {delta.dbc_name}" if delta.dbc_name else "⚠ Unbekannt"
+                f"✓ {delta.dbc_name}" if delta.dbc_name else "⚠ Unknown"
             )
             delta_str = " ".join(f"[{i}]" for i in delta.changed_indices)
             before_cell = self._build_diff_cell(
@@ -2294,11 +2220,11 @@ class DiscoveryScreen(Screen):
         changed_indices: List[int],
         side: str,
     ) -> Text:
-        """Build a Rich Text object for the VORHER or NACHHER column.
+        """Build a Rich Text object for the BEFORE or AFTER column.
 
         Changed bytes are coloured:
-        - VORHER (before): theme 'err' colour (red / orange)
-        - NACHHER (after): theme 'ok' colour (green)
+        - BEFORE: theme 'err' colour (red / orange)
+        - AFTER:  theme 'ok' colour (green)
         Missing bytes shown as '??' when the other snapshot was longer.
 
         Args:
@@ -2306,7 +2232,7 @@ class DiscoveryScreen(Screen):
             changed_indices: Byte positions that differ.
             side:            'before' or 'after' – determines highlight colour.
         """
-        t = THEMES[THEME_NAMES[self._theme_idx]]
+        t = MIDNIGHT
         fg = t["fg"]
         change_color = t["err"] if side == "before" else t["ok"]
 
@@ -2361,7 +2287,7 @@ class DiscoveryScreen(Screen):
         """Toggle between showing all results and unknown-only results."""
         self._unknown_only = not self._unknown_only
         self.query_one("#btn-disc-filter", Button).label = (
-            "Nur ⚠ Unbekannte" if self._unknown_only else "Alle"
+            "⚠ Unknown only" if self._unknown_only else "All"
         )
         if self._disc_state == DiscoveryState.RESULTS:
             self._render_results()
@@ -2386,53 +2312,7 @@ class DiscoveryScreen(Screen):
     # -----------------------------------------------------------------------
     # Theme
     # -----------------------------------------------------------------------
-    def apply_theme(self, t: Dict[str, str]) -> None:
-        """Apply a theme colour dict to all styled elements of this screen."""
-        try:
-            self.screen.styles.background = t["bg"]
-            self.screen.styles.color = t["fg"]
-        except Exception:
-            pass
-        for wid_id in ("#disc-control", "#disc-results"):
-            try:
-                w = self.query_one(wid_id)
-                w.styles.background = t["bg"]
-                w.styles.border = ("solid", t["border"])
-            except Exception:
-                pass
-        for wid_id in ("#disc-control-title", "#disc-results-title"):
-            try:
-                w = self.query_one(wid_id)
-                w.styles.background = t["title_bg"]
-                w.styles.color = t["title_fg"]
-            except Exception:
-                pass
-        try:
-            tbl = self.query_one("#disc-table", DataTable)
-            tbl.styles.background = t["table_bg"]
-            tbl.styles.color = t["fg"]
-        except Exception:
-            pass
-        try:
-            self.query_one(Header).styles.background = t["header_bg"]
-            self.query_one(Header).styles.color = t["header_fg"]
-            self.query_one(Footer).styles.background = t["footer_bg"]
-            self.query_one(Footer).styles.color = t["footer_fg"]
-        except Exception:
-            pass
-        for btn in self.query(Button):
-            try:
-                btn.styles.background = t["btn_bg"]
-                btn.styles.color = t["btn_fg"]
-            except Exception:
-                pass
-        # Re-render table so diff colours match new theme
-        if self._disc_state == DiscoveryState.RESULTS:
-            self._render_results()
 
-    # -----------------------------------------------------------------------
-    # Navigation / delegation
-    # -----------------------------------------------------------------------
     def action_pop_screen(self) -> None:
         """Return to main screen, stop any running timer, resume main timers."""
         if self._timer is not None:
@@ -2442,16 +2322,16 @@ class DiscoveryScreen(Screen):
         app = self.app  # type: ignore[attr-defined]
         app._discovery_screen = None
         app._details_active = False
-        app.sub_title = "v1.3.0"
+        app.sub_title = _APP_VERSION
         if app._monitor_timer:
             app._monitor_timer.resume()
         if app._status_timer:
             app._status_timer.resume()
+        if app._stats_timer:
+            app._stats_timer.resume()
+        # _trace_timer was never paused - no resume needed
         app.pop_screen()
 
-    def action_cycle_theme(self) -> None:
-        """Delegate theme cycling to the main app."""
-        self.app.action_cycle_theme()  # type: ignore[attr-defined]
 
     def action_show_shortcuts(self) -> None:
         """Show the keyboard shortcuts overlay for the discovery context."""
@@ -2468,133 +2348,29 @@ class DiscoveryScreen(Screen):
 
 
 # ---------------------------------------------------------------------------
-# Main screen CSS
-# ---------------------------------------------------------------------------
-MAIN_CSS = """
-Screen {
-    layout: horizontal;
-    padding: 1;
-    background: #000080;
-    color: #00ffff;
-}
-
-Header { background: #00aaaa; color: #000000; }
-Footer { dock: bottom; background: #00aaaa; color: #000000; }
-
-#left-col {
-    width: 1fr;
-    height: 100%;
-    layout: vertical;
-}
-
-#right-col {
-    width: 90;
-    height: 100%;
-    layout: vertical;
-    margin-left: 1;
-}
-
-ConnectionPanel {
-    border: solid #00ffff; padding: 1;
-    height: auto; background: #000080; color: #00ffff;
-    margin-bottom: 1;
-}
-MonitorPanel {
-    border: solid #00ffff; padding: 1;
-    height: 1fr; background: #000080;
-}
-StatusPanel {
-    border: solid #00ffff; padding: 1;
-    height: auto; background: #000080; color: #00ffff;
-    margin-bottom: 1;
-}
-SendPanel {
-    border: solid #00ffff; padding: 1;
-    height: auto; background: #000080; color: #00ffff;
-    margin-bottom: 1;
-}
-FilterPanel {
-    border: solid #00ffff; padding: 0 1;
-    height: auto; background: #000080; color: #00ffff;
-}
-
-.panel-title {
-    text-style: bold; color: #000000; background: #00aaaa;
-    padding: 0 1; width: 100%; text-align: center; margin-bottom: 1;
-}
-.form-row    { height: 3; align-vertical: middle; margin-bottom: 0; }
-.filter-row  { height: 3; align-vertical: middle; }
-.send-row    { height: 3; align-vertical: middle; margin-bottom: 0; }
-
-.form-label    { width: 8; padding-top: 1; color: #ffffff; }
-.send-label    { width: 7; padding-top: 1; color: #ffffff; }
-.send-label-sm { width: 5; padding-top: 1; color: #ffffff; }
-
-.button-row        { height: auto; margin-top: 1; align-horizontal: center; }
-.button-row Button { margin: 0 1; background: #004488; color: #ffffff; }
-
-.status-row        { height: auto; }
-.status-row Static { width: 1fr; }
-
-.status-disconnected {
-    color: #ff5555; text-style: bold; text-align: center; margin-bottom: 1;
-}
-.status-connected {
-    color: #00ff00; text-style: bold; text-align: center; margin-bottom: 1;
-}
-
-#port-select  { width: 1fr; }
-#speed-select { width: 1fr; }
-#mode-select  { width: 1fr; }
-
-#btn-refresh      { width: auto; min-width: 13; background: #004488; color: #ffffff; }
-#filter-input     { width: 1fr; background: #000060; color: #00ffff; }
-#btn-filter-mode  { width: auto; min-width: 12; background: #004488; color: #ffffff; }
-#btn-filter-clear { width: auto; min-width: 8;  background: #004488; color: #ffffff; }
-#btn-sort         { width: auto; min-width: 12; background: #004488; color: #ffffff; }
-
-.send-input-id     { width: 12; background: #001a4d; color: #00ffff; }
-.send-input-data   { width: 1fr; background: #001a4d; color: #00ffff; }
-.send-input-period { width: 10; background: #001a4d; color: #00ffff; }
-.send-input-name   { width: 1fr; background: #001a4d; color: #00ffff; }
-.send-status       { height: 1; color: #00ff00; text-align: center; }
-
-#monitor-table { height: 1fr; background: #000060; color: #00ffff; }
-
-#status-busload     { width: 1fr; }
-#status-unique-ids  { width: 1fr; }
-#status-busload-bar { width: 1fr; }
-
-Select { background: #004488; color: #00ffff; }
-"""
-
-
-# ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
 class CANBusTUI(App):
     """Waveshare CAN Bus TUI - main application class."""
 
     TITLE = "Waveshare CAN Bus Tool"
-    SUB_TITLE = "v1.3.0"
-    CSS = MAIN_CSS
+    SUB_TITLE = _APP_VERSION
+    CSS = _build_css(MIDNIGHT)
 
     # Context-sensitive bindings for the main screen only.
     # F-key actions map to named action methods; the footer displays only these.
     BINDINGS = [
-        ("f1", "show_shortcuts", "F1 Help"),
-        ("f2", "connect", "F2 Connect"),
-        ("f3", "disconnect", "F3 Disconnect"),
-        ("f5", "refresh_ports", "F5 Refresh"),
-        ("f6", "show_fullscreen_monitor", "F6 Monitor"),
-        ("f7", "show_discovery", "F7 Discovery"),
-        ("space", "toggle_pause", "Space Pause"),
-        ("delete", "clear_monitor", "Del Clear"),
-        ("s", "cycle_sort", "s Sort"),
-        ("f", "focus_filter", "f Filter"),
-        ("t", "cycle_theme", "t Theme"),
-        ("f4", "show_details", "F4 Details"),
-        ("q", "quit", "q Quit"),
+        ("f2", "connect", "Connect"),
+        ("f3", "disconnect", "Disconnect"),
+        ("f5", "refresh_ports", "Refresh Ports"),
+        ("f6", "show_fullscreen_monitor", "Monitor"),
+        ("f7", "show_discovery", "Discovery"),
+        ("space", "toggle_pause", "Pause"),
+        ("delete", "clear_monitor", "Clear"),
+        ("s", "cycle_sort", "Sort"),
+        ("f", "focus_filter", "Filter"),
+        ("f4", "show_details", "Details"),
+        ("q", "quit", "Quit"),
     ]
 
     is_connected: reactive = reactive(False)
@@ -2611,14 +2387,13 @@ class CANBusTUI(App):
         self._monitor_timer: Optional[Timer] = None
         self._stats_timer: Optional[Timer] = None
         self._trace_timer: Optional[Timer] = None
-        self._theme_idx: int = 0
 
         self._store = CANFrameStore()
         self._table_rows: Dict[int, bool] = {}
         self._change_ts: Dict[int, float] = {}
-        # Tracks the last timestamp when a CAN-ID's data *actually changed*.
-        # Distinct from _change_ts (1 s highlight); used for 10 s stale colouring.
-        self._last_actual_change_ts: Dict[int, float] = {}
+        # Per-byte last-change timestamps for stale highlighting.
+        # Key: CAN-ID, Value: list of float timestamps, one entry per byte position.
+        self._last_actual_change_ts: Dict[int, List[float]] = {}
 
         # Counters written by RX background thread - protected by lock
         self._counters_lock = threading.Lock()
@@ -2657,6 +2432,30 @@ class CANBusTUI(App):
         # Tracks whether a secondary screen (Details/Fullscreen) is active
         self._details_active: bool = False
 
+        # ---------------------------------------------------------------------------
+        # Cached widget references – populated once after mount / screen open.
+        # Avoids repeated DOM traversal in hot timer callbacks.
+        # ---------------------------------------------------------------------------
+        # Main screen (permanent – valid for entire app lifetime after on_mount)
+        self._w_monitor_table: Optional[DataTable] = None
+        self._w_monitor_panel: Optional[MonitorPanel] = None
+        self._w_status_rx: Optional[Static] = None
+        self._w_status_fps: Optional[Static] = None
+        self._w_status_queue: Optional[Static] = None
+        self._w_status_busload: Optional[Static] = None
+        self._w_busload_bar: Optional[Static] = None
+
+        # Details screen (valid only while DetailsScreen is pushed)
+        self._w_trace_panel: Optional[TracePanel] = None
+        self._w_trace_table: Optional[DataTable] = None
+        self._w_trace_count: Optional[Static] = None
+        self._w_trace_elapsed: Optional[Static] = None
+        self._w_trace_warning: Optional[Static] = None
+
+        # Column key caches – populated in _populate(), cleared in _return_to_main()
+        self._w_dbc_msg_col_keys: Optional[list] = None
+        self._w_stats_col_keys: Optional[list] = None
+
     # -----------------------------------------------------------------------
     # Composition & lifecycle
     # -----------------------------------------------------------------------
@@ -2674,7 +2473,7 @@ class CANBusTUI(App):
 
     def on_mount(self) -> None:
         """Start background timers after the DOM is ready."""
-        self._log("CAN Bus TUI v1.3.0 started")
+        self._log(f"CAN Bus TUI {_APP_VERSION} started")
         self._log(f"Platform: {platform.system()} {platform.release()}")
         self._log(
             "F1=Help  F2=Connect  F3=Disconnect  F4=Details  "
@@ -2690,6 +2489,8 @@ class CANBusTUI(App):
 
         # Give keyboard focus to the monitor table so arrow keys work immediately
         self.call_after_refresh(self._focus_monitor_table)
+        # Cache permanent main-screen widget references after first render
+        self.call_after_refresh(self._cache_main_widgets)
 
         # Apply CLI startup arguments after first render
         if (self._startup_args.port or self._startup_args.speed
@@ -2702,6 +2503,23 @@ class CANBusTUI(App):
             self.query_one("#monitor-table", DataTable).focus()
         except Exception:
             pass
+
+    def _cache_main_widgets(self) -> None:
+        """Cache permanent main-screen widget references after first render.
+
+        Called once via call_after_refresh so the DOM is fully built.
+        These widgets live for the entire app lifetime – safe to cache forever.
+        """
+        try:
+            self._w_monitor_panel = self.query_one(MonitorPanel)
+            self._w_monitor_table = self.query_one("#monitor-table", DataTable)
+            self._w_status_rx = self.query_one("#status-rx-count", Static)
+            self._w_status_fps = self.query_one("#status-fps", Static)
+            self._w_status_queue = self.query_one("#status-queue", Static)
+            self._w_status_busload = self.query_one("#status-busload", Static)
+            self._w_busload_bar = self.query_one("#status-busload-bar", Static)
+        except Exception as exc:
+            self._log(f"WARNING: widget cache init failed: {exc}")
 
     def _apply_startup_args(self) -> None:
         """Apply CLI startup arguments to the UI after first render."""
@@ -2781,29 +2599,48 @@ class CANBusTUI(App):
                 pass  # DetailsScreen not yet fully mounted - intentional
 
     # -----------------------------------------------------------------------
-    # Shortcuts overlay
-    # -----------------------------------------------------------------------
-    def action_show_shortcuts(self, context: str = "main") -> None:
-        """Push the keyboard shortcuts modal with the given screen context."""
-        screen = ShortcutsScreen(context=context)
-        t = THEMES[THEME_NAMES[self._theme_idx]]
-
-        def _style() -> None:
-            screen.apply_theme(t)
-
-        self.push_screen(screen)
-        self.call_after_refresh(_style)
-
-    # -----------------------------------------------------------------------
     # Details screen
     # -----------------------------------------------------------------------
+    def _return_to_main(self) -> None:
+        """Pop all screens until only the main screen remains.
+
+        Prevents screen stacking when F4/F6/F7 is pressed multiple times.
+        Timers and internal references are reset so the main screen is clean.
+        """
+        self._details_screen = None
+        self._fullscreen_monitor = None
+        self._discovery_screen = None
+        self._details_active = False
+        # Invalidate details-screen widget cache
+        self._w_trace_panel   = None
+        self._w_trace_table   = None
+        self._w_trace_count   = None
+        self._w_trace_elapsed = None
+        self._w_trace_warning = None
+        self._w_dbc_msg_col_keys = None
+        self._w_stats_col_keys   = None
+        if self._monitor_timer:
+            self._monitor_timer.resume()
+        if self._status_timer:
+            self._status_timer.resume()
+        if self._stats_timer:
+            self._stats_timer.resume()
+        if self._trace_timer:
+            self._trace_timer.resume()
+        while len(self.screen_stack) > 1:
+            self.pop_screen()
+
     def action_show_details(self) -> None:
-        """Push the Details screen, pause main-screen-only timers."""
+        """Switch to the Details screen (F4); close any open sub-screen first."""
+        self._return_to_main()
         self._details_active = True
         if self._monitor_timer:
             self._monitor_timer.pause()
         if self._status_timer:
             self._status_timer.pause()
+        if self._stats_timer:
+            self._stats_timer.resume()  # Stats tab needs live updates
+        # _trace_timer intentionally kept running for recording + flush
 
         ds = DetailsScreen(name="details")
         self._details_screen = ds
@@ -2814,10 +2651,27 @@ class CANBusTUI(App):
                 log_w = ds.query_one("#event-log", Log)
                 for line in self._log_lines[-LOG_HISTORY_LINES:]:
                     log_w.write_line(line)
-                ds.apply_theme(THEMES[THEME_NAMES[self._theme_idx]])
+                # Cache details-screen widget references for hot timer callbacks
+                tp = ds.query_one(TracePanel)
+                self._w_trace_panel   = tp
+                self._w_trace_table   = tp.query_one("#trace-table",   DataTable)
+                self._w_trace_count   = tp.query_one("#trace-count",   Static)
+                self._w_trace_elapsed = tp.query_one("#trace-elapsed", Static)
+                self._w_trace_warning = tp.query_one("#trace-warning", Static)
+                # Cache column key lists for stats and DBC tables
+                try:
+                    stats_tbl = ds.query_one("#stats-table", DataTable)
+                    self._w_stats_col_keys = list(stats_tbl.columns)
+                except Exception:
+                    pass
+                try:
+                    dbc_panel = ds.query_one(DBCPanel)
+                    msg_tbl = dbc_panel.query_one("#dbc-msg-table", DataTable)
+                    self._w_dbc_msg_col_keys = list(msg_tbl.columns)
+                except Exception:
+                    pass
                 self._update_statistics()
                 self._update_trace_controls()
-                # Populate DBC tab if a DB is already loaded
                 if self._dbc.loaded:
                     self._populate_dbc_msg_table()
                     self._update_dbc_status_label()
@@ -2830,12 +2684,17 @@ class CANBusTUI(App):
     # Fullscreen Monitor
     # -----------------------------------------------------------------------
     def action_show_fullscreen_monitor(self) -> None:
-        """Push the MonitorFullScreen (F6), pause main-screen-only timers."""
+        """Switch to the Fullscreen Monitor (F6); close any open sub-screen first."""
+        self._return_to_main()
         self._details_active = True
         if self._monitor_timer:
             self._monitor_timer.pause()
         if self._status_timer:
             self._status_timer.pause()
+        if self._stats_timer:
+            self._stats_timer.pause()
+        # _trace_timer intentionally kept running: silently drains the pending
+        # buffer to prevent unbounded memory growth during background recording
 
         fs = MonitorFullScreen(name="fullscreen_monitor")
         self._fullscreen_monitor = fs
@@ -2845,8 +2704,6 @@ class CANBusTUI(App):
             try:
                 fs._store = self._store
                 fs._dbc = self._dbc
-                fs._theme_idx = self._theme_idx
-                fs.apply_theme(THEMES[THEME_NAMES[self._theme_idx]])
             except Exception as exc:
                 self._log(f"WARNING: FullscreenMonitor init failed: {exc}")
 
@@ -2856,12 +2713,17 @@ class CANBusTUI(App):
     # Signal Discovery Screen  (F7)
     # -----------------------------------------------------------------------
     def action_show_discovery(self) -> None:
-        """Push the Signal Discovery screen (F7), pause main-screen-only timers."""
+        """Switch to the Signal Discovery screen (F7); close any open sub-screen first."""
+        self._return_to_main()
         self._details_active = True
         if self._monitor_timer:
             self._monitor_timer.pause()
         if self._status_timer:
             self._status_timer.pause()
+        if self._stats_timer:
+            self._stats_timer.pause()
+        # _trace_timer intentionally kept running: silently drains the pending
+        # buffer to prevent unbounded memory growth during background recording
 
         ds = DiscoveryScreen(name="discovery")
         self._discovery_screen = ds
@@ -2871,8 +2733,6 @@ class CANBusTUI(App):
             try:
                 ds._store = self._store
                 ds._dbc = self._dbc
-                ds._theme_idx = self._theme_idx
-                ds.apply_theme(THEMES[THEME_NAMES[self._theme_idx]])
             except Exception as exc:
                 self._log(f"WARNING: DiscoveryScreen init failed: {exc}")
 
@@ -2909,7 +2769,7 @@ class CANBusTUI(App):
             for msg in self._dbc.get_messages():
                 is_ext = msg.can_id > CAN_STD_MAX
                 id_str = (
-                    f"0x{msg.can_id:08X}" if is_ext else f"0x{msg.can_id:03X}"
+                    _fmt_can_id(msg.can_id, is_ext)
                 )
                 tbl.add_row(
                     id_str,
@@ -2927,7 +2787,7 @@ class CANBusTUI(App):
             return
         try:
             lbl = self._details_screen.query_one("#dbc-status", Static)
-            t = THEMES[THEME_NAMES[self._theme_idx]]
+            t = MIDNIGHT
             if error:
                 lbl.update(f"ERROR: {error}")
                 lbl.styles.color = t["err"]
@@ -2964,18 +2824,17 @@ class CANBusTUI(App):
             return
 
         rows = self._store.read()
-        t = THEMES[THEME_NAMES[self._theme_idx]]
-        msg_col_keys = list(msg_tbl.columns)
+        t = MIDNIGHT
+        msg_col_keys = self._w_dbc_msg_col_keys or list(msg_tbl.columns)
         if not msg_col_keys:
             return
 
         # Highlight the Signals column in ok-colour for IDs that have live data
         for can_id, e in rows.items():
-            if not self._dbc.lookup_name(can_id):
+            result = self._dbc.lookup_decode(can_id, bytes(e["frame"].data))
+            if result is None:
                 continue
-            signals = self._dbc.decode(can_id, bytes(e["frame"].data))
-            if signals is None:
-                continue
+            _name, signals = result
             try:
                 msg_tbl.update_cell(
                     str(can_id),
@@ -3007,7 +2866,7 @@ class CANBusTUI(App):
         if not rows:
             return
 
-        t = THEMES[THEME_NAMES[self._theme_idx]]
+        t = MIDNIGHT
         max_fps = SPEED_MAX_FPS.get(self._current_speed, _DEFAULT_MAX_FPS)
 
         stats_rows: List[Tuple] = []
@@ -3030,7 +2889,7 @@ class CANBusTUI(App):
         if ds is not None:
             try:
                 table = ds.query_one("#stats-table", DataTable)
-                col_keys = list(table.columns)
+                col_keys = self._w_stats_col_keys or list(table.columns)
 
                 existing_keys: Set[str] = {
                     str(row.key.value) for row in table.rows.values()
@@ -3048,7 +2907,7 @@ class CANBusTUI(App):
                 for rank, (can_id, is_ext, dlc, rate, count, pct) in enumerate(
                     stats_rows, 1
                 ):
-                    id_str = f"0x{can_id:08X}" if is_ext else f"0x{can_id:03X}"
+                    id_str = _fmt_can_id(can_id, is_ext)
                     type_str = "Ext" if is_ext else "Std"
                     pct_color = (
                         t["load_high"] if pct >= 20
@@ -3105,14 +2964,14 @@ class CANBusTUI(App):
         """Update the bus-load percentage label and ASCII bar in the status panel."""
         max_fps = SPEED_MAX_FPS.get(self._current_speed, _DEFAULT_MAX_FPS)
         load = min(fps / max_fps * 100, 100.0) if max_fps > 0 else 0.0
-        t = THEMES[THEME_NAMES[self._theme_idx]]
+        t = MIDNIGHT
         color = (
             t["load_high"] if load >= 75
             else t["load_mid"] if load >= 40
             else t["load_low"]
         )
         try:
-            bl = self.query_one("#status-busload", Static)
+            bl = self._w_status_busload or self.query_one("#status-busload", Static)
             bl.update(f"Bus Load: {load:5.1f}%")
             bl.styles.color = color
         except Exception:
@@ -3121,7 +2980,7 @@ class CANBusTUI(App):
         filled = int(load / 100 * bar_width)
         bar = "[" + "\u2588" * filled + "\u2591" * (bar_width - filled) + "]"
         try:
-            bb = self.query_one("#status-busload-bar", Static)
+            bb = self._w_busload_bar or self.query_one("#status-busload-bar", Static)
             bb.update(bar)
             bb.styles.color = color
         except Exception:
@@ -3235,12 +3094,13 @@ class CANBusTUI(App):
         filepath = os.path.join(os.getcwd(), filename)
 
         # --- Export ---
+        actual_bitrate = _SPEED_TO_BITRATE.get(self._current_speed, 500_000)
         ok, message = export_records(
             records,
             fmt,
             filepath,
             channel=1,
-            bitrate=500_000,
+            bitrate=actual_bitrate,
         )
 
         if ok:
@@ -3327,9 +3187,9 @@ class CANBusTUI(App):
         if state == TraceState.PAUSED:
             if self._details_screen is not None:
                 try:
-                    tp = self._details_screen.query_one(TracePanel)
+                    w_count = self._w_trace_count or self._details_screen.query_one(TracePanel).query_one("#trace-count", Static)
                     count = self._trace_buf.count
-                    tp.query_one("#trace-count", Static).update(
+                    w_count.update(
                         f"Frames: {count:,}  (+{self._trace_buf.pending_count} buffered)"
                     )
                 except Exception:
@@ -3341,11 +3201,14 @@ class CANBusTUI(App):
             # when actually recording (not paused, handled above).
             self._trace_buf.drain_pending()
             return
-        try:
-            tp = self._details_screen.query_one(TracePanel)
-        except Exception:
-            self._trace_buf.drain_pending()
-            return
+
+        tp = self._w_trace_panel
+        if tp is None:
+            try:
+                tp = self._details_screen.query_one(TracePanel)
+            except Exception:
+                self._trace_buf.drain_pending()
+                return
 
         pending = self._trace_buf.drain_pending()
         if not pending:
@@ -3356,15 +3219,16 @@ class CANBusTUI(App):
         if remainder:
             self._trace_buf.prepend_pending(remainder)
 
-        t = THEMES[THEME_NAMES[self._theme_idx]]
+        t = MIDNIGHT
 
         try:
-            table = tp.query_one("#trace-table", DataTable)
+            table   = self._w_trace_table   or tp.query_one("#trace-table",   DataTable)
+            w_count = self._w_trace_count   or tp.query_one("#trace-count",   Static)
+            w_elaps = self._w_trace_elapsed or tp.query_one("#trace-elapsed", Static)
+            w_warn  = self._w_trace_warning or tp.query_one("#trace-warning", Static)
+
             for rec in batch:
-                id_str = (
-                    f"0x{rec.can_id:08X}" if rec.is_extended
-                    else f"0x{rec.can_id:03X}"
-                )
+                id_str = _fmt_can_id(rec.can_id, rec.is_extended)
                 data_str = rec.data.hex(" ").upper()
                 ts_str = f"{rec.rel_ts:10.4f}"
                 row_color = t["highlight"] if rec.direction == "Tx" else t["fg"]
@@ -3380,7 +3244,7 @@ class CANBusTUI(App):
                 table.scroll_end(animate=False)
 
             count = self._trace_buf.count
-            tp.query_one("#trace-count", Static).update(f"Frames: {count:,}")
+            w_count.update(f"Frames: {count:,}")
 
             if (
                 self._trace_elapsed_start is not None
@@ -3390,12 +3254,9 @@ class CANBusTUI(App):
                 h = int(elapsed // 3600)
                 m = int((elapsed % 3600) // 60)
                 s = elapsed % 60
-                tp.query_one("#trace-elapsed", Static).update(
-                    f"Elapsed: {h:02d}:{m:02d}:{s:05.2f}"
-                )
+                w_elaps.update(f"Elapsed: {h:02d}:{m:02d}:{s:05.2f}")
 
-            warn_w = tp.query_one("#trace-warning", Static)
-            warn_w.update(">100k frames - memory warning" if self._trace_buf.warning else "")
+            w_warn.update(">100k frames - memory warning" if self._trace_buf.warning else "")
 
         except Exception as exc:
             self._log(f"WARNING: flush_trace UI update failed: {exc}")
@@ -3689,7 +3550,7 @@ class CANBusTUI(App):
             return
 
         if self.can.send(can_id, data, is_extended=extended):
-            id_str = f"0x{can_id:08X}" if extended else f"0x{can_id:03X}"
+            id_str = _fmt_can_id(can_id, extended)
             self._trace_record_tx(can_id, data, extended)
             self._set_send_status(f"Sent {id_str}  {data.hex(' ').upper()}")
             self._log(f"TX: {id_str}  {data.hex(' ').upper()}")
@@ -3737,7 +3598,7 @@ class CANBusTUI(App):
         self._local_cyclic_threads[name] = (stop_event, thread)
 
         self.query_one("#btn-cyclic-stop", Button).disabled = False
-        id_str = f"0x{can_id:08X}" if extended else f"0x{can_id:03X}"
+        id_str = _fmt_can_id(can_id, extended)
         self._set_send_status(f"Cyclic '{name}' {id_str} every {period_ms}ms")
         self._log(f"Cyclic start: '{name}' {id_str}  {period_ms}ms")
 
@@ -3782,7 +3643,7 @@ class CANBusTUI(App):
     def _set_send_status(self, msg: str, error: bool = False) -> None:
         """Update the send status label with an ok or error colour."""
         try:
-            t = THEMES[THEME_NAMES[self._theme_idx]]
+            t = MIDNIGHT
             w = self.query_one("#send-status", Static)
             w.update(msg)
             w.styles.color = t["err"] if error else t["ok"]
@@ -3839,7 +3700,7 @@ class CANBusTUI(App):
         except Exception:
             pass
         self._table_rows.clear()
-        self._store._dirty = True
+        self._store.mark_dirty()
 
     # -----------------------------------------------------------------------
     # Sort
@@ -3869,12 +3730,29 @@ class CANBusTUI(App):
     # Monitor table update
     # -----------------------------------------------------------------------
     def _build_data_cell(
-        self, data: bytes, mask: List[bool], highlight: str, fg: str
+        self,
+        data: bytes,
+        mask: List[bool],
+        highlight: str,
+        fg: str,
+        stale_mask: Optional[List[bool]] = None,
+        stale_color: str = "",
     ) -> Text:
-        """Build a Rich Text object for the Data column, highlighting changed bytes."""
+        """Build a Rich Text object for the Data column.
+
+        Bytes are coloured in priority order:
+          1. highlight  – byte changed within the last HIGHLIGHT_FADE_S seconds
+          2. stale_color – byte unchanged for more than STALE_TIMEOUT_S seconds
+          3. fg          – normal foreground colour
+        """
         text = Text()
         for i, bv in enumerate(data):
-            color = highlight if (mask[i] if i < len(mask) else False) else fg
+            if mask[i] if i < len(mask) else False:
+                color = highlight
+            elif stale_mask and (stale_mask[i] if i < len(stale_mask) else False):
+                color = stale_color
+            else:
+                color = fg
             text.append(f"{bv:02X}", style=color)
             if i < len(data) - 1:
                 text.append(" ", style=fg)
@@ -3887,14 +3765,21 @@ class CANBusTUI(App):
         dirty, rows = self._store.snapshot()
         if not dirty:
             return
+        # Use cached references; fall back to query_one if cache not yet ready
+        mp    = self._w_monitor_panel
+        table = self._w_monitor_table
+        if mp is None or table is None:
+            try:
+                mp    = self.query_one(MonitorPanel)
+                table = self.query_one("#monitor-table", DataTable)
+            except Exception:
+                return
         try:
-            mp = self.query_one(MonitorPanel)
-            table = self.query_one("#monitor-table", DataTable)
             ck = mp.col_keys
         except Exception:
             return
 
-        t = THEMES[THEME_NAMES[self._theme_idx]]
+        t = MIDNIGHT
         fg = t["fg"]
         highlight = t["highlight"]
         stale_color = t["err"]   # re-use the theme error colour for stale frames
@@ -3919,7 +3804,7 @@ class CANBusTUI(App):
             elapsed = e["last_ts"] - e["first_ts"]
             rate = (count - 1) / elapsed if elapsed > 0 and count > 1 else 0.0
 
-            id_str = f"0x{can_id:08X}" if frame.is_extended else f"0x{can_id:03X}"
+            id_str = _fmt_can_id(can_id, frame.is_extended)
             if self._dbc.loaded:
                 msg_name = self._dbc.lookup_name(can_id)
                 if msg_name:
@@ -3938,26 +3823,37 @@ class CANBusTUI(App):
                 else [False] * len(frame.data)
             )
 
-            # Update stale tracking: only on actual data change
-            if any(mask):
-                self._change_ts[can_id] = now
-                self._last_actual_change_ts[can_id] = now
-            elif can_id not in self._last_actual_change_ts:
-                # First time we see this ID: start the stale clock
-                self._last_actual_change_ts[can_id] = now
+            # Per-byte stale tracking: update timestamps for changed bytes,
+            # initialise timestamps for bytes seen for the first time.
+            dlc = len(frame.data)
+            if can_id not in self._last_actual_change_ts:
+                # First appearance: start stale clock for every byte now
+                self._last_actual_change_ts[can_id] = [now] * dlc
+            else:
+                byte_ts = self._last_actual_change_ts[can_id]
+                # Grow list if DLC increased (edge case)
+                while len(byte_ts) < dlc:
+                    byte_ts.append(now)
+                if any(mask):
+                    self._change_ts[can_id] = now
+                    for i, changed in enumerate(mask):
+                        if i < dlc and changed:
+                            byte_ts[i] = now
 
-            # Determine stale state (10 s without data change → red)
-            is_stale = (
-                can_id in self._last_actual_change_ts
-                and (now - self._last_actual_change_ts[can_id]) > STALE_TIMEOUT_S
-            )
-            data_fg = stale_color if is_stale else fg
+            # Build per-byte stale mask: True where byte hasn't changed for > STALE_TIMEOUT_S
+            byte_ts = self._last_actual_change_ts[can_id]
+            stale_mask = [
+                (now - byte_ts[i]) > STALE_TIMEOUT_S if i < len(byte_ts) else False
+                for i in range(dlc)
+            ]
+            is_row_stale = all(stale_mask)  # whole row red only if every byte is stale
 
             data_cell = self._build_data_cell(
                 frame.data, active_mask,
-                highlight, data_fg,
+                highlight, fg,
+                stale_mask=stale_mask, stale_color=stale_color,
             )
-            dlc_text = Text(dlc_str, style=stale_color if is_stale else fg)
+            dlc_text = Text(dlc_str, style=stale_color if is_row_stale else fg)
             row_key = str(can_id)
 
             if can_id not in self._table_rows:
@@ -3981,11 +3877,12 @@ class CANBusTUI(App):
         """Refresh the status panel widgets (guarded against Details screen active)."""
         try:
             qs = self.can.rx_queue.qsize() if self.can else 0
-            self.query_one("#status-rx-count", Static).update(
-                f"RX Frames: {self.rx_count}"
-            )
-            self.query_one("#status-fps", Static).update(f"Frames/s: {self.fps:.1f}")
-            self.query_one("#status-queue", Static).update(f"Queue: {qs}")
+            w_rx    = self._w_status_rx    or self.query_one("#status-rx-count", Static)
+            w_fps   = self._w_status_fps   or self.query_one("#status-fps",      Static)
+            w_queue = self._w_status_queue or self.query_one("#status-queue",    Static)
+            w_rx.update(f"RX Frames: {self.rx_count}")
+            w_fps.update(f"Frames/s: {self.fps:.1f}")
+            w_queue.update(f"Queue: {qs}")
             self._render_bus_load(self.fps)
         except Exception:
             pass  # Main screen widgets not reachable while Details is active
@@ -4007,7 +3904,7 @@ class CANBusTUI(App):
         """
         state = self._trace_buf.state
         if state == TraceState.IDLE:
-            self.sub_title = "v1.3.0"
+            self.sub_title = _APP_VERSION
             self._blink_state = False
             return
 
@@ -4047,7 +3944,7 @@ class CANBusTUI(App):
             mode:      Mode label for the status panel.
             warning:   Optional warning text shown in the connection status widget.
         """
-        t = THEMES[THEME_NAMES[self._theme_idx]]
+        t = MIDNIGHT
         try:
             sc = self.query_one("#status-connection", Static)
             bc = self.query_one("#btn-connect", Button)
@@ -4086,12 +3983,12 @@ class CANBusTUI(App):
     # -----------------------------------------------------------------------
     def _update_monitor_title(self) -> None:
         """Refresh the monitor panel title to show or hide the PAUSED indicator."""
-        t = THEMES[THEME_NAMES[self._theme_idx]]
+        t = MIDNIGHT
         title = self.query_one("#monitor-title", Static)
         if self.paused:
             title.update("LIVE MONITOR  [ PAUSED ]")
             title.styles.background = t["paused"]
-            title.styles.color = "#000000"
+            title.styles.color = t["paused_fg"]
         else:
             title.update("LIVE MONITOR")
             title.styles.background = t["title_bg"]
@@ -4099,77 +3996,6 @@ class CANBusTUI(App):
 
     def watch_paused(self, paused: bool) -> None:
         """Reactive watcher: update the monitor title whenever paused changes."""
-        self._update_monitor_title()
-
-    # -----------------------------------------------------------------------
-    # Theme
-    # -----------------------------------------------------------------------
-    def action_cycle_theme(self) -> None:
-        """Advance to the next theme and apply it to all screens."""
-        self._theme_idx = (self._theme_idx + 1) % len(THEME_NAMES)
-        name = THEME_NAMES[self._theme_idx]
-        self._apply_theme(THEMES[name])
-        self._log(f"Theme: {name}")
-        if self._details_screen is not None:
-            self._details_screen.apply_theme(THEMES[name])
-        if self._fullscreen_monitor is not None:
-            self._fullscreen_monitor._theme_idx = self._theme_idx
-            self._fullscreen_monitor.apply_theme(THEMES[name])
-        if self._discovery_screen is not None:
-            self._discovery_screen._theme_idx = self._theme_idx
-            self._discovery_screen.apply_theme(THEMES[name])
-
-    def _apply_theme(self, t: Dict[str, str]) -> None:
-        """Apply a theme colour dict to all widgets on the main screen."""
-        self.screen.styles.background = t["bg"]
-        self.screen.styles.color = t["fg"]
-        for cls, bk, fk in [
-            (Header, "header_bg", "header_fg"),
-            (Footer, "footer_bg", "footer_fg"),
-        ]:
-            try:
-                w = self.query_one(cls)
-                w.styles.background = t[bk]
-                w.styles.color = t[fk]
-            except Exception:
-                pass
-        try:
-            self.query_one("#left-col").styles.background = t["bg"]
-            self.query_one("#right-col").styles.background = t["bg"]
-        except Exception:
-            pass
-        for panel in (ConnectionPanel, StatusPanel, MonitorPanel, FilterPanel, SendPanel):
-            try:
-                p = self.query_one(panel)
-                p.styles.background = t["bg"]
-                p.styles.color = t["fg"]
-                p.styles.border = ("solid", t["border"])
-            except Exception:
-                pass
-        for el in self.query(".panel-title"):
-            el.styles.background = t["title_bg"]
-            el.styles.color = t["title_fg"]
-        for el in self.query(".form-label, .send-label, .send-label-sm"):
-            el.styles.color = t["accent"]
-        for btn in self.query(Button):
-            btn.styles.background = t["btn_bg"]
-            btn.styles.color = t["btn_fg"]
-        sc = self.query_one("#status-connection", Static)
-        sc.styles.color = t["ok"] if self.is_connected else t["err"]
-        for wid, bk in [
-            ("#monitor-table", "table_bg"),
-            ("#filter-input", "input_bg"),
-            ("#send-id", "input_bg"),
-            ("#send-data", "input_bg"),
-            ("#send-period", "input_bg"),
-            ("#send-name", "input_bg"),
-        ]:
-            try:
-                w = self.query_one(wid)
-                w.styles.background = t[bk]
-                w.styles.color = t["fg"]
-            except Exception:
-                pass
         self._update_monitor_title()
 
     # -----------------------------------------------------------------------
@@ -4302,3 +4128,4 @@ class CANBusTUI(App):
 if __name__ == "__main__":
     app = CANBusTUI(startup_args=parse_cli_args())
     app.run()
+
