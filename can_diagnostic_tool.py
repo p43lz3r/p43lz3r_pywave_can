@@ -8,7 +8,7 @@ Features: Fixed-view display, DBC decoding, cyclic transmission, filtering
 import sys
 import time
 import argparse
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from collections import defaultdict
 from datetime import datetime
 
@@ -54,7 +54,7 @@ class FixedViewDisplay:
         self.max_ids = max_ids
         self.frame_cache: Dict[int, CANFrame] = {}
         self.stats = CANStatistics()
-        self.db: Optional[cantools.database.Database] = None
+        self.db: Optional[Any] = None  # cantools Database (None if not loaded)
     
     def load_dbc(self, dbc_path: str) -> bool:
         """Load a DBC file for signal decoding"""
@@ -285,7 +285,7 @@ def main():
         '--speed', '-s',
         type=int,
         default=500,
-        choices=[5, 10, 20, 25, 40, 50, 80, 100, 125, 200, 250, 400, 500, 666, 800, 1000],
+        choices=[5, 10, 20, 50, 100, 125, 200, 250, 400, 500, 800, 1000],
         help='CAN bus speed in kbps (default: 500)'
     )
     
@@ -321,14 +321,12 @@ def main():
     
     args = parser.parse_args()
     
-    # Map speed to enum
+    # Map speed to enum – only values defined in CANSpeed are valid
     speed_map = {
         5: CANSpeed.SPEED_5K, 10: CANSpeed.SPEED_10K, 20: CANSpeed.SPEED_20K,
-        25: CANSpeed.SPEED_25K, 40: CANSpeed.SPEED_40K, 50: CANSpeed.SPEED_50K,
-        80: CANSpeed.SPEED_80K, 100: CANSpeed.SPEED_100K, 125: CANSpeed.SPEED_125K,
+        50: CANSpeed.SPEED_50K, 100: CANSpeed.SPEED_100K, 125: CANSpeed.SPEED_125K,
         200: CANSpeed.SPEED_200K, 250: CANSpeed.SPEED_250K, 400: CANSpeed.SPEED_400K,
-        500: CANSpeed.SPEED_500K, 666: CANSpeed.SPEED_666K, 800: CANSpeed.SPEED_800K,
-        1000: CANSpeed.SPEED_1M
+        500: CANSpeed.SPEED_500K, 800: CANSpeed.SPEED_800K, 1000: CANSpeed.SPEED_1M,
     }
     
     # Map mode to enum
@@ -383,3 +381,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
