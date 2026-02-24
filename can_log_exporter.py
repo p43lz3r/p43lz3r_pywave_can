@@ -1,6 +1,6 @@
-# 2026-02-22 14:00 v1.0.0 - Multi-format CAN log exporter: CSV, ASC (Vector CANalyzer),
-#                           TRC (PEAK PCAN-View), BLF (Vector Binary Logging Format).
-#                           Strategy-pattern: one BaseExporter subclass per format.
+# 2026-02-24 00:00 v1.1.0 - Rewrite TRC exporter: FILEVERSION 2.1 → 1.1, exact
+#                           PCAN-View v1.1 column layout and header block for
+#                           PCAN Explorer compatibility.
 """
 CAN Log Exporter  –  multi-format export module for can_tui.py.
 
@@ -8,7 +8,7 @@ Supported output formats
 ------------------------
   CSV   Plain comma-separated values.  Universally importable (Excel, Python …).
   ASC   ASCII log format written by Vector CANalyzer / CANoe (text, *.asc).
-  TRC   PEAK PCAN-View trace format v2.1 (text, *.trc).
+  TRC   PEAK PCAN-View trace format v1.1 (text, *.trc).
   BLF   Vector Binary Logging Format (binary, *.blf) via the python-can library.
 
 Usage example
@@ -42,6 +42,20 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, List, Optional, Protocol, Tuple
+
+# Tool version embedded in exported file headers
+_TOOL_VERSION = "v1.6.0"
+
+
+def _fmt_can_id(can_id: int, is_extended: bool) -> str:
+    """Format a CAN ID without leading zeros (CANalyzer-compatible).
+
+    Extended (29-bit): no zero-padding  → e.g. 0xEFF001A  (7 digits)
+    Standard (11-bit): always 3 digits  → e.g. 0x111
+    """
+    if is_extended:
+        return f"0x{can_id:X}"
+    return f"0x{can_id:03X}"
 
 # ---------------------------------------------------------------------------
 # Optional python-can import (needed only for BLF)
@@ -179,10 +193,7 @@ class CSVExporter(BaseExporter):
                 ["Time_s", "CAN_ID_hex", "Type", "Dir", "DLC", "Data_hex"]
             )
             for rec in records:
-                id_str = (
-                    f"0x{rec.can_id:08X}" if rec.is_extended
-                    else f"0x{rec.can_id:03X}"
-                )
+                id_str = _fmt_can_id(rec.can_id, rec.is_extended)
                 writer.writerow([
                     f"{rec.rel_ts:.6f}",
                     id_str,
@@ -252,77 +263,94 @@ class ASCExporter(BaseExporter):
 
 
 # ---------------------------------------------------------------------------
-# TRC exporter  (PEAK PCAN-View trace format v2.1)
+# TRC exporter  (PEAK PCAN-View trace format v1.1)
 # ---------------------------------------------------------------------------
 
 class TRCExporter(BaseExporter):
-    """Export to PEAK PCAN-View trace format v2.1 (.trc).
+    """Export to PEAK PCAN-View trace format v1.1 (.trc).
 
-    Format reference: PCAN-View TRC v2.1 specification.
+    Format reference: PCAN-View TRC v1.1 – the format accepted by PCAN Explorer
+    and PCAN-View 5.x when opened via File → Open.
 
-    File header lines start with ';'.
-    The ;$STARTTIME is expressed as a Windows OLE Automation Date (days since
-    30-Dec-1899 in UTC).
+    Column layout (matches PCAN-View output exactly):
+        <msg_nr>)  <time_ms>  <dir>  <id_8hex>  <dlc>  <data bytes ...>
 
-    Frame line layout:
-        <index>)    <rel_time_ms>  <dir>  <id_str>  <dlc>  <b0> <b1> …
-         e.g.:
-             1)         0.1  Rx  0111  8  11 22 33 44 55 66 77 88
-             2)         0.5  Tx  18FEF100  8  DE AD BE EF 00 11 22 33
+        Field widths (1-based character positions):
+          msg_nr  right-aligned in col 1-6   (e.g. "     1)")
+          time_ms right-aligned in col 8-18  (e.g. "       0.9")  1 decimal
+          dir     col 20-21                  ("Rx" or "Tx")
+          id      col 24-31                  always 8 hex digits
+          dlc     col 34                     1 digit
+          data    col 36+                    "BB 9B …" space-separated
 
-    Extended IDs are written as 8 hex digits (no suffix).
-    Standard IDs are written as 3 hex digits.
+    Extended IDs are written as-is (8 hex digits).
+    Standard IDs (11-bit) are zero-padded to 8 digits to match PCAN-View v1.1
+    behaviour – PCAN Explorer ignores the upper nibbles for standard frames.
+
+    The ;$STARTTIME value is a Windows OLE Automation Date (fractional days
+    since 30-Dec-1899 00:00:00 UTC), matching what PCAN-View writes.
     """
 
     # OLE Automation Date epoch: 30-Dec-1899 00:00:00 UTC
     _OLE_EPOCH = datetime(1899, 12, 30, tzinfo=timezone.utc)
 
+    # Column positions derived from real PCAN-View v1.1 trace files:
+    #   msg_nr field ends at position  6  (right-aligned, followed by ")")
+    #   time_ms field right-edge at   18  (1 decimal place, in ms)
+    #   dir field starts at           20
+    #   id field starts at            27  (8 hex digits)
+    #   dlc field starts at           37
+    #   data field starts at          40
+    _HDR_RULER = (
+        ";---+--   ----+----  --+--  ----+---  +  "
+        "-+ -- -- -- -- -- -- --"
+    )
+
     def _ole_date(self, dt: datetime) -> float:
         """Convert a datetime to an OLE Automation Date (fractional days)."""
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        delta = dt - self._OLE_EPOCH
-        return delta.total_seconds() / 86400.0
+        return (dt - self._OLE_EPOCH).total_seconds() / 86400.0
 
     def _write(self, records: List[Any], filepath: str) -> None:
         now = datetime.now()
         ole_start = self._ole_date(now.replace(tzinfo=timezone.utc))
 
+        # Start-time string: DD.MM.YYYY HH:MM:SS.mmm.0  (matches PCAN-View)
+        start_str = now.strftime("%d.%m.%Y %H:%M:%S.") + f"{now.microsecond // 1000:03d}.0"
+
         lines: List[str] = []
 
-        # --- File header ---
-        lines.append(";$FILEVERSION=2.1")
+        # --- File header (exact PCAN-View v1.1 layout) ---
+        lines.append(";$FILEVERSION=1.1")
         lines.append(f";$STARTTIME={ole_start:.10f}")
-        lines.append(
-            f";   Start time: {now.strftime('%d.%m.%Y %H:%M:%S.%f')[:23]}"
-        )
-        lines.append(";   Generated by Waveshare CAN TUI")
-        lines.append(
-            f";   Channel {self._channel} – {self._bitrate // 1000} kbps"
-        )
-        lines.append(
-            ";-------------------------------------------------------------------------------"
-        )
-        lines.append(";   Message   Time     Type  ID    Rx/Tx  DL  Data")
-        lines.append(
-            ";-------------------------------------------------------------------------------"
-        )
+        lines.append(";")
+        lines.append(f";   Start time: {start_str}")
+        lines.append(f";   Generated by Waveshare CAN TUI {_TOOL_VERSION}")
+        lines.append(";")
+        lines.append(";   Message Number")
+        lines.append(";   |         Time Offset (ms)")
+        lines.append(";   |         |        Type")
+        lines.append(";   |         |        |        ID (hex)")
+        lines.append(";   |         |        |        |     Data Length")
+        lines.append(";   |         |        |        |     |   Data Bytes (hex) ...")
+        lines.append(";   |         |        |        |     |   |")
+        lines.append(self._HDR_RULER)
 
         # --- Frame records ---
         for idx, rec in enumerate(records, start=1):
-            # Time in milliseconds
             time_ms = rec.rel_ts * 1000.0
-            # ID: 8 hex digits for extended, 4 for standard (PCAN-View style)
-            id_str = (
-                f"{rec.can_id:08X}" if rec.is_extended
-                else f"{rec.can_id:04X}"
-            )
-            frame_type = "Ext" if rec.is_extended else "Std"
-            dir_str = rec.direction
+            # TRC v1.1 always uses 8 zero-padded hex digits for the ID field –
+            # this is required by the format spec and matches PCAN-View output.
+            # Note: _fmt_can_id() is intentionally NOT used here.
+            id_str = f"{rec.can_id:08X}"
+            dir_str = rec.direction  # "Rx" or "Tx"
             data_str = " ".join(f"{b:02X}" for b in rec.data)
+            # Format matches PCAN-View v1.1 column layout exactly:
+            #   "     1)         0.9  Rx     0EFF011C  8  BB 9B …"
             lines.append(
-                f"{idx:>8})  {time_ms:>12.1f}  {dir_str}  "
-                f"{frame_type}  {id_str}  {rec.dlc}  {data_str}"
+                f"{idx:>6})  {time_ms:>11.1f}  {dir_str:<2}     {id_str}  "
+                f"{rec.dlc}  {data_str}"
             )
 
         with open(filepath, "w", encoding="utf-8") as fh:
@@ -364,10 +392,14 @@ class BLFExporter(BaseExporter):
         # approximately "now".
         base_ts = time.time() - (records[-1].rel_ts if records else 0.0)
 
-        with python_can.BLFWriter(filepath) as blf_writer:
+        with python_can.BLFWriter(filepath, channel=self._channel) as blf_writer:
             for rec in records:
                 abs_ts = base_ts + rec.rel_ts
-                # python-can Message: is_extended_id controls 29-bit flag
+                # Pass channel=None in the Message so BLFWriter uses its own
+                # default channel directly.  If msg.channel is set, python-can
+                # applies a +1 offset ("many interfaces start at 0 which is
+                # invalid") which would shift our channel 1 → 2, causing
+                # CANalyzer to not find the DBC mapping.
                 msg = python_can.Message(
                     timestamp=abs_ts,
                     arbitration_id=rec.can_id,
@@ -375,7 +407,7 @@ class BLFExporter(BaseExporter):
                     is_remote_frame=False,
                     dlc=rec.dlc,
                     data=rec.data,
-                    channel=self._channel,
+                    channel=None,  # let BLFWriter use its own default (no +1 offset)
                 )
                 blf_writer(msg)
 
