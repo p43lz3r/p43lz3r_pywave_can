@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# 2026-02-19 00:00 v1.0.2 - Correct CANSpeed/CANMode enums and full 20-byte setup command per Waveshare PDF spec
-# 2026-02-22 v1.1.0 - Add CANFrameType enum (STANDARD / EXTENDED).
-#                     setup() accepts frame_type parameter (default EXTENDED, unchanged behaviour).
-#                     Add rx_frame_count property for Auto-Detection support in can_tui.py.
+# 2026-02-24 00:00 v1.1.0 - Add CANFrameType enum, frame_type parameter to setup(),
+#                           rx_frame_count attribute and reset_rx_count() for Auto-Detection.
+#                           Remove dead queue.Full handler (queue is unbounded, maxsize=0).
 """
 Waveshare USB-CAN-A Dongle Interface Class
 Professional CAN bus diagnostic tool with thread-safe operation
@@ -14,7 +13,7 @@ import queue
 import time
 from dataclasses import dataclass
 from typing import Optional, Callable, Dict, List
-from enum import IntEnum
+from enum import IntEnum, Enum
 
 
 class CANSpeed(IntEnum):
@@ -42,15 +41,14 @@ class CANMode(IntEnum):
 
 
 class CANFrameType(IntEnum):
-    """CAN Frame Type — protocol byte for config command (PDF p.6, byte 4).
+    """CAN Frame Type — controls which frame type the dongle listens for.
 
-    Per Waveshare documentation the dongle accepts only ONE frame type at a time:
-    - STANDARD  (0x01): 11-bit IDs only
-    - EXTENDED  (0x02): 29-bit IDs only
-    There is no hardware mode that receives both simultaneously.
+    Maps to byte 4 of the Waveshare setup command (PDF p.6):
+      STANDARD = 0x01  accept 11-bit standard frames only
+      EXTENDED = 0x02  accept both 11-bit and 29-bit extended frames
     """
-    STANDARD = 0x01   # 11-bit CAN IDs
-    EXTENDED = 0x02   # 29-bit CAN IDs
+    STANDARD = 0x01
+    EXTENDED = 0x02
 
 
 @dataclass
@@ -100,20 +98,16 @@ class WaveshareCAN:
         self.running = False
         self.rx_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-
-        # Active frame type set by setup() – read by _receive_loop() for ID parsing
-        self._frame_type: CANFrameType = CANFrameType.EXTENDED
-
-        # Total RX frames since last reset_rx_count() – used for Auto-Detection
-        self._rx_frame_count: int = 0
-        self._rx_count_lock = threading.Lock()
-
+        
         # Cyclic transmission support
         self._cyclic_tasks: Dict[str, threading.Thread] = {}
         self._cyclic_stop_events: Dict[str, threading.Event] = {}
-
+        
         # Callback for received messages
         self.on_message_received: Optional[Callable[[CANFrame], None]] = None
+
+        # Frame counter used by Auto-Detection logic in can_tui.py
+        self.rx_frame_count: int = 0
         
     def open(self) -> bool:
         """
@@ -134,33 +128,30 @@ class WaveshareCAN:
             print(f"[ERR] Failed to open {self.port}: {e}")
             return False
     
-    def setup(self,
+    def setup(self, 
               speed: CANSpeed = CANSpeed.SPEED_500K,
               mode: CANMode = CANMode.NORMAL,
               frame_type: CANFrameType = CANFrameType.EXTENDED) -> bool:
-        """Initialize Waveshare dongle with CAN bus parameters.
+        """
+        Initialize Waveshare dongle with CAN bus parameters.
 
         Args:
-            speed:      CAN bus bitrate (see CANSpeed enum).
-            mode:       CAN operating mode (see CANMode enum).
-            frame_type: Frame type to receive – STANDARD (11-bit) or EXTENDED (29-bit).
-                        Per Waveshare protocol spec the dongle accepts only one type
-                        at a time (PDF byte 4: 0x01=Standard, 0x02=Extended).
+            speed:      CAN bus speed (see CANSpeed enum)
+            mode:       CAN operating mode (see CANMode enum)
+            frame_type: STANDARD (11-bit only) or EXTENDED (11+29-bit)
 
         Returns:
-            True if the setup command was sent successfully.
+            True if successful
         """
         if not self.ser or not self.ser.is_open:
             print("[ERR] Serial port not open")
             return False
-
-        self._frame_type = frame_type
-
+        
         # Build 20-byte CAN configuration command per Waveshare protocol spec (PDF p.6):
         # Byte  0-1 : 0xAA 0x55  header
         # Byte  2   : 0x12       type = variable-length protocol
         # Byte  3   : speed      CANSpeed enum value
-        # Byte  4   : frame_type 0x01=Standard only, 0x02=Extended only
+        # Byte  4   : frame_type CANFrameType enum value (0x01=Std, 0x02=Ext)
         # Bytes 5-8 : filter_id  0x00000000 = pass all
         # Bytes 9-12: block_id   0x00000000 = block nothing
         # Byte  13  : can_mode   CANMode enum value
@@ -168,49 +159,32 @@ class WaveshareCAN:
         # Bytes 15-18: 0x00      backup
         # Byte  19  : checksum   sum(bytes[2..18]) & 0xFF
         setup_cmd = [
-            0xAA, 0x55,              # header
-            0x12,                    # variable-length protocol
-            int(speed),              # byte 3: CAN baud rate
-            int(frame_type),         # byte 4: frame type (0x01 Std / 0x02 Ext)
+            0xAA, 0x55,        # header
+            0x12,              # variable-length protocol
+            int(speed),        # byte 3: CAN baud rate
+            int(frame_type),   # byte 4: frame type (Std or Ext)
             0x00, 0x00, 0x00, 0x00,  # bytes 5-8:  filter ID (pass all)
             0x00, 0x00, 0x00, 0x00,  # bytes 9-12: block  ID (block nothing)
-            int(mode),               # byte 13: CAN mode
-            0x00,                    # byte 14: auto-retransmit enabled
+            int(mode),         # byte 13: CAN mode
+            0x00,              # byte 14: auto-retransmit enabled
             0x00, 0x00, 0x00, 0x00,  # bytes 15-18: backup
         ]
-        checksum = sum(setup_cmd[2:]) & 0xFF
+        checksum = sum(setup_cmd[2:]) & 0xFF  # sum bytes 2..18
         setup_cmd.append(checksum)
 
         try:
             self.ser.write(bytes(setup_cmd))
             time.sleep(0.5)  # Give device time to configure
-            ft_str = "Standard (11-bit)" if frame_type == CANFrameType.STANDARD else "Extended (29-bit)"
-            speed_str = speed.name.replace("SPEED_", "")
-            print(f"[OK] Waveshare initialized: {speed_str}, {mode.name}, {ft_str}")
+            
+            speed_str = f"{speed.name.replace('SPEED_', '')}bps"
+            mode_str = mode.name
+            ft_str = frame_type.name.capitalize()
+            print(f"[OK] Waveshare initialized: {speed_str}, {mode_str} mode, {ft_str}")
             return True
         except Exception as e:
             print(f"[ERR] Setup failed: {e}")
             return False
     
-    @property
-    def rx_frame_count(self) -> int:
-        """Total number of frames received since the last reset_rx_count() call.
-
-        Thread-safe. Used by the Auto-Detection logic in can_tui.py to check
-        whether any frames arrived after a setup() call.
-        """
-        with self._rx_count_lock:
-            return self._rx_frame_count
-
-    def reset_rx_count(self) -> None:
-        """Reset the rx_frame_count to zero.
-
-        Call this immediately before starting an Auto-Detection window so that
-        only frames received after the setup() command are counted.
-        """
-        with self._rx_count_lock:
-            self._rx_frame_count = 0
-
     def start_listening(self):
         """Start background thread for receiving CAN frames"""
         if self.running:
@@ -231,6 +205,10 @@ class WaveshareCAN:
         if self.rx_thread:
             self.rx_thread.join(timeout=2.0)
         print("[OK] Listener stopped")
+
+    def reset_rx_count(self) -> None:
+        """Reset the rx_frame_count to zero (used by Auto-Detection)."""
+        self.rx_frame_count = 0
     
     def _receive_loop(self):
         """
@@ -290,14 +268,10 @@ class WaveshareCAN:
                     timestamp=time.time()
                 )
                 
-                # Step 7: Queue frame and trigger callback
-                try:
-                    self.rx_queue.put_nowait(frame)
-                    with self._rx_count_lock:
-                        self._rx_frame_count += 1
-                except queue.Full:
-                    print("[WARN] RX Queue full, dropping frame")
-                
+                # Step 7: Queue frame and trigger callback (queue is unbounded)
+                self.rx_queue.put_nowait(frame)
+                self.rx_frame_count += 1  # used by Auto-Detection
+
                 if self.on_message_received:
                     self.on_message_received(frame)
                     
@@ -453,7 +427,8 @@ if __name__ == "__main__":
     can = WaveshareCAN()
     
     if can.open():
-        can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL)
+        can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL,
+                  frame_type=CANFrameType.EXTENDED)
         can.start_listening()
         
         # Example: Send a test frame
@@ -468,3 +443,4 @@ if __name__ == "__main__":
                 print(frame)
         
         can.close()
+
