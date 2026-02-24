@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+# 2026-02-24 14:00 v1.7.0 - PEAK PCAN-USB hardware support added.
+#                           New "Hardware" selector in ConnectionPanel:
+#                           Waveshare USB-CAN-A / PEAK PCAN-USB.
+#                           Port selector auto-switches: serial ports for
+#                           Waveshare, PCAN_USBBUSn channels for PEAK.
+#                           Frame Type selector hidden when PEAK is selected
+#                           (PEAK receives Std+Ext simultaneously; no auto-detect).
+#                           python-can bus-error log noise suppressed.
+#                           Requires peak_can.py v1.0.0.
 # 2026-02-23 23:00 v1.6.0 - Single midnight theme only; theme switching removed.
 #                           CSS baked at startup from theme_midnight.THEME.
 #                           Correct theming on all screens at startup.
@@ -29,12 +38,13 @@
 #                     Fixes silent loss of 11-bit Standard CAN frames (hardware limitation:
 #                     Waveshare dongle accepts only one frame type at a time per protocol spec).
 """
-CAN Bus TUI - Textual-based Terminal UI for Waveshare USB-CAN-A.
+CAN Bus TUI - Textual-based Terminal UI for Waveshare USB-CAN-A and PEAK PCAN-USB.
 
-Requires waveshare_can.py v1.0.2 (corrected CANSpeed enum + setup command).
-Requires cantools >= 39.0  (pip install cantools)
-Requires can_log_exporter.py v1.0.0  (multi-format log export)
-Optional: python-can  (pip install python-can)  – required for BLF export only.
+Requires waveshare_can.py v1.1.0
+Requires peak_can.py v1.0.0       (pip install python-can)
+Requires cantools >= 39.0          (pip install cantools)
+Requires can_log_exporter.py v1.0.0
+Optional: python-can               (pip install python-can) – required for PEAK + BLF export.
 """
 
 import argparse
@@ -61,6 +71,18 @@ from textual.reactive import reactive
 from textual.timer import Timer
 
 from waveshare_can import WaveshareCAN, CANFrame, CANSpeed, CANMode, CANFrameType
+
+# PEAK PCAN-USB backend (optional – graceful fallback when python-can missing)
+try:
+    from peak_can import PeakCAN, detect_peak_channels
+    _PEAK_AVAILABLE = True
+    # Suppress python-can internal bus-error console noise that would
+    # corrupt the TUI display (e.g. "Bus error: error counter reached…").
+    import logging as _logging
+    _logging.getLogger("can").setLevel(_logging.CRITICAL)
+    _logging.getLogger("can.pcan").setLevel(_logging.CRITICAL)
+except ImportError:
+    _PEAK_AVAILABLE = False
 
 import theme_midnight
 
@@ -167,6 +189,27 @@ FRAME_TYPE_OPTIONS: List[Tuple[str, Optional[CANFrameType]]] = [
 
 # Seconds to wait for frames before switching frame type during Auto-Detection
 AUTO_DETECT_TIMEOUT_S = 3.0
+
+
+# ---------------------------------------------------------------------------
+# Hardware backend selector
+# ---------------------------------------------------------------------------
+class HardwareType(Enum):
+    """Supported CAN hardware backends."""
+
+    WAVESHARE = "waveshare"
+    PEAK = "peak"
+
+
+HARDWARE_OPTIONS: List[Tuple[str, HardwareType]] = [
+    ("Waveshare USB-CAN-A", HardwareType.WAVESHARE),
+    ("PEAK PCAN-USB", HardwareType.PEAK),
+]
+
+# PEAK channel names offered in the manual-override dropdown
+_PEAK_CHANNEL_OPTIONS: List[Tuple[str, str]] = [
+    (f"PCAN_USBBUS{i}", f"PCAN_USBBUS{i}") for i in range(1, 9)
+]
 
 SORT_MODES: List[Tuple[str, str, bool]] = [
     ("ID \u2191", "id", False),
@@ -845,6 +888,8 @@ FilterPanel {{
 #speed-select      {{ width: 1fr; }}
 #mode-select       {{ width: 1fr; }}
 #frame-type-select {{ width: 1fr; }}
+#hardware-select   {{ width: 1fr; }}
+#peak-channel-select {{ width: 1fr; }}
 
 Select {{
     background: {t["select_bg"]};
@@ -1245,12 +1290,22 @@ class ShortcutsScreen(ModalScreen):
 
 
 class ConnectionPanel(Container):
-    """Panel holding port, speed, mode selectors and Connect/Disconnect buttons."""
+    """Panel holding hardware, port/channel, speed, mode selectors and Connect/Disconnect buttons."""
 
     def compose(self) -> ComposeResult:
         """Build the connection panel layout."""
         yield Static("CONNECTION", classes="panel-title")
+        # --- Hardware selector ---
         with Horizontal(classes="form-row"):
+            yield Label("HW:", classes="form-label")
+            yield Select(
+                HARDWARE_OPTIONS,
+                id="hardware-select",
+                value=HardwareType.WAVESHARE,
+                allow_blank=False,
+            )
+        # --- Waveshare: serial port row (visible by default) ---
+        with Horizontal(classes="form-row", id="row-port"):
             yield Label("Port:", classes="form-label")
             ports = detect_serial_ports()
             yield Select(
@@ -1260,6 +1315,21 @@ class ConnectionPanel(Container):
                 allow_blank=False,
             )
             yield Button("Refresh [F5]", id="btn-refresh", variant="default")
+        # --- PEAK: channel row (hidden by default) ---
+        with Horizontal(classes="form-row", id="row-peak-channel"):
+            yield Label("Channel:", classes="form-label")
+            peak_channels = detect_peak_channels() if _PEAK_AVAILABLE else []
+            peak_opts = (
+                [(ch, ch) for ch in peak_channels] if peak_channels
+                else _PEAK_CHANNEL_OPTIONS
+            )
+            peak_default = peak_channels[0] if peak_channels else "PCAN_USBBUS1"
+            yield Select(
+                peak_opts,
+                id="peak-channel-select",
+                value=peak_default,
+                allow_blank=False,
+            )
         with Horizontal(classes="form-row"):
             yield Label("Speed:", classes="form-label")
             yield Select(SPEED_OPTIONS, id="speed-select",
@@ -1268,7 +1338,8 @@ class ConnectionPanel(Container):
             yield Label("Mode:", classes="form-label")
             yield Select(MODE_OPTIONS, id="mode-select",
                          value=CANMode.NORMAL, allow_blank=False)
-        with Horizontal(classes="form-row"):
+        # Frame Type row – hidden when PEAK is selected
+        with Horizontal(classes="form-row", id="row-frame-type"):
             yield Label("Frames:", classes="form-label")
             yield Select(
                 FRAME_TYPE_OPTIONS,
@@ -2353,7 +2424,7 @@ class DiscoveryScreen(Screen):
 class CANBusTUI(App):
     """Waveshare CAN Bus TUI - main application class."""
 
-    TITLE = "Waveshare CAN Bus Tool"
+    TITLE = "CAN Bus Tool"
     SUB_TITLE = _APP_VERSION
     CSS = _build_css(MIDNIGHT)
 
@@ -2381,7 +2452,8 @@ class CANBusTUI(App):
     def __init__(self, startup_args: Optional[StartupArgs] = None) -> None:
         super().__init__()
         self._startup_args: StartupArgs = startup_args or StartupArgs()
-        self.can: Optional[WaveshareCAN] = None
+        self.can: Optional[object] = None   # WaveshareCAN or PeakCAN instance
+        self._active_hardware: HardwareType = HardwareType.WAVESHARE
         self._fps_timer: Optional[Timer] = None
         self._status_timer: Optional[Timer] = None
         self._monitor_timer: Optional[Timer] = None
@@ -2491,6 +2563,8 @@ class CANBusTUI(App):
         self.call_after_refresh(self._focus_monitor_table)
         # Cache permanent main-screen widget references after first render
         self.call_after_refresh(self._cache_main_widgets)
+        # Hide PEAK-only rows on startup (Waveshare is default hardware)
+        self.call_after_refresh(self._apply_hardware_row_visibility)
 
         # Apply CLI startup arguments after first render
         if (self._startup_args.port or self._startup_args.speed
@@ -2501,6 +2575,16 @@ class CANBusTUI(App):
         """Move keyboard focus to the monitor DataTable."""
         try:
             self.query_one("#monitor-table", DataTable).focus()
+        except Exception:
+            pass
+
+    def _apply_hardware_row_visibility(self) -> None:
+        """Show/hide port vs. channel rows based on current hardware selection."""
+        is_peak = (self._active_hardware == HardwareType.PEAK)
+        try:
+            self.query_one("#row-port").display = not is_peak
+            self.query_one("#row-peak-channel").display = is_peak
+            self.query_one("#row-frame-type").display = not is_peak
         except Exception:
             pass
 
@@ -2990,13 +3074,45 @@ class CANBusTUI(App):
     # Port refresh
     # -----------------------------------------------------------------------
     def _refresh_ports(self) -> None:
-        """Re-scan serial ports and repopulate the port selector."""
-        ports = detect_serial_ports()
-        sel = self.query_one("#port-select", Select)
-        sel.set_options([(p, p) for p in ports])
-        if ports:
-            sel.value = ports[0]
-        self._log(f"Ports: {', '.join(ports)}")
+        """Re-scan ports/channels and repopulate the selector for the active hardware."""
+        hw = self._active_hardware
+        if hw == HardwareType.PEAK:
+            if not _PEAK_AVAILABLE:
+                self._log("ERROR: python-can not installed – PEAK unavailable")
+                return
+            channels = detect_peak_channels()
+            opts = [(ch, ch) for ch in channels] if channels else _PEAK_CHANNEL_OPTIONS
+            sel = self.query_one("#peak-channel-select", Select)
+            sel.set_options(opts)
+            if channels:
+                sel.value = channels[0]
+            self._log(f"PEAK channels: {', '.join(channels) if channels else '(none found)'}")
+        else:
+            ports = detect_serial_ports()
+            sel = self.query_one("#port-select", Select)
+            sel.set_options([(p, p) for p in ports])
+            if ports:
+                sel.value = ports[0]
+            self._log(f"Ports: {', '.join(ports)}")
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """React to hardware-selector changes to swap the port/channel row visibility."""
+        if event.select.id != "hardware-select":
+            return
+        hw: HardwareType = event.value  # type: ignore[assignment]
+        self._active_hardware = hw
+        is_peak = (hw == HardwareType.PEAK)
+        try:
+            self.query_one("#row-port").display = not is_peak
+            self.query_one("#row-peak-channel").display = is_peak
+            self.query_one("#row-frame-type").display = not is_peak
+        except Exception:
+            pass
+        if is_peak and not _PEAK_AVAILABLE:
+            self._log(
+                "WARNING: python-can not installed – PEAK PCAN-USB unavailable. "
+                "Run: pip install python-can"
+            )
 
     # -----------------------------------------------------------------------
     # Trace - state machine helpers
@@ -3265,14 +3381,70 @@ class CANBusTUI(App):
     # Connection
     # -----------------------------------------------------------------------
     def _do_connect(self) -> None:
-        """Open the serial port, initialise the CAN dongle and start Auto-Detection."""
+        """Open the selected hardware, initialise the CAN bus and start listening."""
         if self.is_connected:
             self._log("Already connected")
             return
 
-        port = self.query_one("#port-select", Select).value
+        hw = self._active_hardware
         speed = self.query_one("#speed-select", Select).value
         mode = self.query_one("#mode-select", Select).value
+
+        speed_name = next((lbl for lbl, v in SPEED_OPTIONS if v == speed), str(speed))
+        mode_name = next((lbl for lbl, v in MODE_OPTIONS if v == mode), str(mode))
+
+        # ---- PEAK path ----
+        if hw == HardwareType.PEAK:
+            if not _PEAK_AVAILABLE:
+                self._log("ERROR: python-can not installed – run: pip install python-can")
+                return
+
+            channel = self.query_one("#peak-channel-select", Select).value
+            if channel in (Select.BLANK,):
+                self._log("ERROR: No PEAK channel selected")
+                return
+
+            self._log(f"Connecting to PEAK {channel} ...")
+            self.can = PeakCAN(channel=str(channel))
+            if not self.can.open():
+                self._log(f"ERROR: Failed to open {channel}")
+                self.can = None
+                return
+
+            if not self.can.setup(speed=speed, mode=mode):
+                self._log("ERROR: PEAK setup failed")
+                self.can.close()
+                self.can = None
+                return
+
+            self._current_speed = speed
+            # PEAK receives Std+Ext simultaneously – treat as Extended
+            self._current_frame_type = CANFrameType.EXTENDED
+            self.can.on_message_received = self._on_can_frame
+            self.can.start_listening()
+
+            self.is_connected = True
+            with self._counters_lock:
+                self._rx_count_raw = 0
+                self._fps_raw = 0
+            self.rx_count = 0
+
+            self._store.clear()
+            self._table_rows.clear()
+            self._change_ts.clear()
+            self._last_actual_change_ts.clear()
+            try:
+                self.query_one("#monitor-table", DataTable).clear()
+            except Exception:
+                pass
+
+            self._log(f"Connected: PEAK {channel} @ {speed_name}, {mode_name}")
+            self._update_connection_ui(True, str(channel), speed_name, mode_name)
+            self._update_frame_type_label("Std + Ext (PEAK)")
+            return
+
+        # ---- Waveshare path (original logic, unchanged) ----
+        port = self.query_one("#port-select", Select).value
         frame_type_sel = self.query_one("#frame-type-select", Select).value
 
         if port in (Select.BLANK, "(no ports found)"):
@@ -3294,9 +3466,6 @@ class CANBusTUI(App):
             manual_frame_type if manual_frame_type is not None
             else CANFrameType.EXTENDED
         )
-
-        speed_name = next((label for label, v in SPEED_OPTIONS if v == speed), str(speed))
-        mode_name = next((label for label, v in MODE_OPTIONS if v == mode), str(mode))
 
         if not self.can.setup(speed=speed, mode=mode, frame_type=initial_frame_type):
             self._log("ERROR: Setup failed")
