@@ -1,444 +1,368 @@
 # Waveshare USB-CAN-A Python Library
 
-A CAN bus monitoring and diagnostic tool for the
-**Waveshare USB-CAN-A** dongle, built in Python with a full Terminal User
-Interface (TUI).  Designed to run entirely in a terminal,
-cross-platform, no GUI required.
+Professional CAN bus workflows on a $25 dongle. Live monitoring, DBC signal decoding,
+trace recording, and signal discovery — all from the terminal, on Linux and Windows.
+
+---
 
 ![20260220_181255](https://github.com/user-attachments/assets/0bad2f4e-777d-4a2a-9fd4-12481b0eb92f)
 
 ---
 
-## Table of Contents
+> **All GUI elements are in English.**  
+> Tested on **Ubuntu Linux** and **Windows 11**.
 
-- [Features](#features)
-- [Hardware Requirements](#hardware-requirements)
-- [Software Requirements](#software-requirements)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [CLI Arguments](#cli-arguments)
-- [User Interface](#user-interface)
-  - [Main Screen](#main-screen)
-  - [Live Monitor](#live-monitor)
-  - [Trace Tab](#trace-tab)
-  - [Statistics Tab](#statistics-tab)
-  - [DBC Tab](#dbc-tab)
-  - [F4 Details Screen](#f4-details-screen)
-  - [F6 Fullscreen Monitor](#f6-fullscreen-monitor)
-  - [F7 Signal Discovery](#f7-signal-discovery)
-- [Keyboard Shortcuts](#keyboard-shortcuts)
-- [Frame Type & Auto-Detection](#frame-type--auto-detection)
-- [DBC File Support](#dbc-file-support)
-- [Log Export Formats](#log-export-formats)
-- [Known Hardware Limitations](#known-hardware-limitations)
-- [File Overview](#file-overview)
-- [Version History](#version-history)
-- [ToDo / Roadmap](#todo--roadmap)
+> **Terminal display:** The tool requires a **maximized terminal window** to render
+> correctly. On some displays, zooming out one step (`Ctrl` + `-`) before
+> launching can improve layout density.
+
+> **Active development:** The Textual-based UI is under ongoing development.
+> Layout and usability improvements are being worked on.
 
 ---
 
-## Features
+## Requirements
 
-| Category | Capability |
-|---|---|
-| **Live Monitor** | Real-time per-ID table with byte-change highlighting, rate, count, DLC |
-| **Stale Detection** | Frames with no data change for > 10 s turn red automatically |
-| **Trace** | Chronological frame log with Record / Pause / Stop controls |
-| **Export** | CSV, ASC, TRC (PEAK PCAN-View), BLF |
-| **Statistics** | Top-N IDs by rate / count, bus load percentage |
-| **Transmit** | Single-shot and cyclic frame transmission |
-| **Filter** | Whitelist / blacklist by CAN-ID, space- or comma-separated |
-| **DBC Support** | Load `.dbc` files for live signal decoding and message name display |
-| **Signal Discovery** | Snapshot-based change detection with noise filtering (F7) |
-| **Themes** | Multiple colour themes, cycle with `t` |
-| **Frame Type** | Auto-detect Standard (11-bit) vs Extended (29-bit) on connect |
-| **Cross-platform** | Linux and Windows (serial port detection automatic) |
-
----
-
-## Hardware Requirements
-
-- **Waveshare USB-CAN-A** dongle
-  (USB to CAN bus converter, variable-length serial protocol)
-- CAN bus to connect to (vehicle, test bench, Raspberry Pi with MCP2515, etc.)
-
-> **Hardware note:** The Waveshare USB-CAN-A dongle can receive **only one
-> frame type at a time** — either Standard (11-bit) or Extended (29-bit).
-> This is a hardware/protocol limitation documented in the Waveshare spec
-> (config byte 4: `0x01` = Standard only, `0x02` = Extended only).
-> The tool handles this transparently via Auto-Detection on connect.
-> See [Frame Type & Auto-Detection](#frame-type--auto-detection).
-
----
-
-## Software Requirements
-
-| Package | Version | Notes |
-|---|---|---|
-| Python | ≥ 3.10 | f-strings, `match`, dataclasses |
-| `pyserial` | any | Serial communication with dongle |
-| `textual` | ≥ 0.50 | TUI framework |
-| `rich` | any | Coloured text in tables (installed with textual) |
-| `cantools` | ≥ 39.0 | DBC file parsing and signal decoding |
-| `python-can` | any | **Optional** — required for BLF export only |
-
----
-
-## Installation
+**Python 3.9+** is required on both platforms.
 
 ```bash
-# 1. Clone or copy the project files
-git clone https://github.com/yourname/waveshare-can-python
-cd waveshare-can-python
-
-# 2. Install dependencies
-pip install pyserial textual cantools
-
-# Optional: BLF export support
-pip install python-can
-
-# 3. On Linux: add your user to the dialout group (one-time)
-sudo usermod -aG dialout $USER
-# then log out and back in
-
-# 4. Run
-python3 can_tui.py
+pip install textual cantools pyserial
+pip install python-can          # required for PEAK PCAN-USB and BLF export
 ```
+
+### Linux — Waveshare USB-CAN-A
+
+Add a udev rule so the device is accessible without `sudo`:
+
+```bash
+echo 'SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE="0666"' \
+  | sudo tee /etc/udev/rules.d/99-waveshare-can.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+### Linux — PEAK PCAN-USB
+
+The kernel `peak_usb` module is loaded automatically on plug-in on most distributions.
+Verify with:
+
+```bash
+ip link show type can      # should list can0, can1, …
+```
+
+No extra driver install needed. `python-can` handles everything via socketcan.
+
+### Windows — PEAK PCAN-USB
+
+Download and install the PEAK System driver package from
+https://www.peak-system.com/Downloads. The installer places `PCANBasic.dll`
+which `python-can` uses automatically.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Basic start — select port and speed in the UI
-python3 can_tui.py
-
-# Auto-connect on startup (port may differ for your setup)
-python3 can_tui.py --port /dev/ttyUSB0 --speed 500K --connect
-
-# With DBC file loaded on startup (port may differ for your setup)
-python3 can_tui.py --port /dev/ttyUSB0 --speed 500K --dbc my_car.dbc --connect
-
-# Windows (port may differ for your setup)
-python can_tui.py --port COM3 --speed 500K --connect
+python can_tui.py
 ```
 
----
+Optional CLI arguments let you pre-configure the session:
 
-## CLI Arguments
+| Argument | Short | Description | Example |
+|---|---|---|---|
+| `--port PORT` | `-p` | Serial port (Waveshare) | `-p /dev/ttyUSB0` or `-p COM3` |
+| `--speed SPEED` | `-s` | CAN bitrate | `-s 500K` |
+| `--dbc FILE` | `-d` | Load a DBC file on startup | `-d vehicle.dbc` |
+| `--connect` | `-c` | Auto-connect on startup | requires `--port` |
 
-| Argument | Short | Description |
-|---|---|---|
-| `--port PORT` | `-p` | Serial port (e.g. `/dev/ttyUSB0` or `COM3`) |
-| `--speed SPEED` | `-s` | CAN bitrate: `5K 10K 20K 50K 100K 125K 200K 250K 400K 500K 800K 1M` |
-| `--dbc FILE` | `-d` | Path to a `.dbc` file to load on startup |
-| `--connect` | `-c` | Auto-connect on startup (requires `--port`) |
+Valid speed values: `5K 10K 20K 50K 100K 125K 200K 250K 400K 500K 800K 1M`
 
----
-
-## User Interface
-
-### Main Screen
-
-The main screen is split into two columns:
-
-**Left column**
-- Connection panel (port, speed, mode, frame type selectors)
-- Live Monitor table
-
-**Right column**
-- Status panel (connection state, RX counters, bus load, detected frame type)
-- Transmit panel (single-shot and cyclic transmission)
-- Filter & Sort panel
-
-A tabbed area on the right holds: **Monitor · Trace · Statistics · DBC**
-
----
-
-### Live Monitor
-
-The central table updates every 200 ms and shows one row per unique CAN-ID:
-
-| Column | Description |
-|---|---|
-| ID | Hex CAN-ID, suffixed with DBC message name if loaded |
-| Type | `Std` (11-bit) or `Ext` (29-bit) |
-| DLC | Data length in bytes |
-| Rate Hz | Frames per second (rolling average) |
-| Count | Total frames received |
-| Data | Hex bytes — changed bytes highlighted for 1 second |
-
-**Stale highlighting:** If a frame's data has not changed for more than
-10 seconds, the DLC and Data cells turn red. This makes inactive signals
-immediately visible on a busy bus.
-
----
-
-### Trace Tab
-
-Chronological log of every frame received (and transmitted):
-
-- **Record** — start recording (blinking `● REC` indicator in header)
-- **Pause** — freeze the display without losing incoming frames
-- **Stop** — end recording, keep buffer for export
-- **Clear** — discard the trace buffer
-- **Export** — save to file in the selected format
-
-Trace columns: `Time (s)` · `CAN-ID` · `Dir (Rx/Tx)` · `DLC` · `Data`
-
-A warning is shown when the buffer exceeds 100 000 frames.
-
----
-
-### Statistics Tab
-
-Top-30 CAN-IDs ranked by receive rate, with a bus load summary line.
-Refreshes every 2 seconds.
-
----
-
-### DBC Tab
-
-Load a `.dbc` file to enable:
-- Message names shown next to CAN-IDs in the monitor
-- Live signal decoding in a dedicated signals table
-- DBC status in Signal Discovery results
-
----
-
-### F4 Details Screen
-
-Push `F4` to open a full-screen overlay with:
-- Extended log view (last 200 lines)
-- DBC file path input and load/unload controls
-- Live decoded signals table (refreshes every second)
-
----
-
-### F6 Fullscreen Monitor
-
-Push `F6` for a fullscreen version of the live monitor table.
-Main-screen timers are paused while F6 is active.
-Click any row to pin/unpin that CAN-ID for focused monitoring.
-
----
-
-### F7 Signal Discovery
-
-The Signal Discovery screen (`F7`) helps identify which CAN-IDs change
-in response to a specific physical action (door, button, switch, etc.).
-It works by comparing two bus snapshots and showing the byte-level diff.
-
-#### Workflow — with Noise Filter (recommended on active buses)
-
-```
-[o] Observe Start
-      │
-      │  Watch the bus for a few seconds while it is idle.
-      │  Every CAN-ID that changes is added to the Noise set.
-      │  The header shows live: "Noise erkannt: 12 IDs"
-      │
-[c] Capture Start  ←── Observe ends, Snapshot 1 taken
-      │
-      │  Perform the physical action (open door, press button, …)
-      │
-[x] Capture Stop   ←── Snapshot 2 taken
-      │
-      ▼
-  RESULTS table — Noise IDs filtered out automatically
-```
-
-#### Workflow — without Noise Filter (quick mode)
-
-Press `[c]` directly without `[o]` first.  
-No noise filtering is applied — all changed IDs are shown.
-
-#### Results Table
-
-| Column | Description |
-|---|---|
-| CAN-ID | Hex identifier |
-| Status | `✓ MessageName` (DBC known) · `⚠ Unbekannt` (no DBC match) |
-| Δ Bytes | Indices of bytes that changed, e.g. `[0] [3] [5]` |
-| VORHER | Byte values before action — changed bytes in **red** |
-| NACHHER | Byte values after action — changed bytes in **green** |
-
-#### Discovery Controls
-
-| Key | Action |
-|---|---|
-| `o` | Observe Start — build noise baseline |
-| `c` | Capture Start — from IDLE, OBSERVING, or RESULTS |
-| `x` | Capture Stop — compute and show results |
-| `s` | Cycle sort: ID ↑ → Δ-Bytes ↓ → Status |
-| `u` | Toggle filter: All results ↔ Unknown (no DBC match) only |
-| `Esc` / `q` | Return to main screen |
-
-#### Edge Cases
-
-| Situation | Behaviour |
-|---|---|
-| `[c]` without prior `[o]` | No noise filter — all changes shown |
-| All changes were noise | Header: "All changes were noise — shorten Observe or use `[c]` directly" |
-| `Del` during OBSERVING | Noise baseline reset; Observe continues with fresh data |
-| `Del` during CAPTURING | Warning shown in results: data may be incomplete |
-| Empty store at `[c]` | Warning: connect first and receive frames |
-
----
-
-## Keyboard Shortcuts
-
-### Main Screen
-
-| Key | Action |
-|---|---|
-| `F1` | Keyboard shortcuts help |
-| `F2` | Connect |
-| `F3` | Disconnect |
-| `F4` | Details screen (log + DBC) |
-| `F5` | Refresh port list |
-| `F6` | Fullscreen monitor |
-| `F7` | Signal Discovery |
-| `Space` | Pause / resume live monitor |
-| `Del` | Clear monitor and frame store |
-| `s` | Cycle sort mode |
-| `f` | Focus filter input |
-| `t` | Cycle colour theme |
-| `q` | Quit |
-
----
-
-## Frame Type & Auto-Detection
-
-The Waveshare USB-CAN-A dongle accepts only **one frame type at a time**:
-
-| Setting | Byte 4 | Receives |
-|---|---|---|
-| Standard | `0x01` | 11-bit IDs only |
-| Extended | `0x02` | 29-bit IDs only |
-
-The **Frame Type** selector in the connection panel offers three options:
-
-- **Auto-Detect** *(default)* — on connect, listens 3 seconds for Extended
-  frames. If none arrive, automatically switches to Standard and listens for
-  another 3 seconds. The detected type is shown in the status panel and the
-  selector is updated. If no frames arrive in either mode, a warning is shown
-  suggesting a baudrate or bus-activity check.
-- **Extended (29-bit)** — fixed Extended mode, no detection.
-- **Standard (11-bit)** — fixed Standard mode, no detection.
-
-> Most modern vehicle buses (CAN FD, ISO-TP diagnostics, OBD-II on newer
-> vehicles) use Extended 29-bit IDs. Classic/legacy buses and many body
-> control modules use Standard 11-bit IDs. Mixed buses (both types
-> simultaneously) are rare in practice.
-
----
-
-## DBC File Support
-
-Load any `.dbc` file to enable message and signal decoding:
-
+**Example — auto-connect at 500 kbps with DBC decoding:**
 ```bash
-# Via CLI
-python3 can_tui.py --dbc path/to/your.dbc
-
-# Via UI
-# F4 → DBC path input → Enter or "Load" button
+python can_tui.py -p /dev/ttyUSB0 -s 500K -d my_vehicle.dbc -c
 ```
 
-With a DBC loaded:
-- CAN-IDs in the monitor show the message name: `0x3B4 DoorControl`
-- The DBC signals table decodes live signal values
-- Signal Discovery shows `✓ MessageName` for known messages
-
-> **Partial DBC coverage is common.** A message may be listed in the DBC
-> with only some of its signals defined. Signal Discovery will correctly
-> identify the message name, but bytes not covered by any signal definition
-> are not further decoded. This is a known limitation and a planned
-> improvement (see ToDo).
-
 ---
 
-## Log Export Formats
+## Using the TUI
 
-| Format | Extension | Tool compatibility |
-|---|---|---|
-| CSV | `.csv` | Excel, Python, any text tool |
-| ASC | `.asc` | Vector CANalyzer, CANoe |
-| TRC | `.trc` | PEAK PCAN-View v2.1 |
-| BLF | `.blf` | Vector tools (requires `python-can`) |
+### Connection Panel
 
-Export is available from the Trace tab after stopping a recording.
+When the tool starts, the **Connection Panel** is shown on the left.
 
----
+1. Select your **Hardware** (Waveshare USB-CAN-A or PEAK PCAN-USB).
+2. Select the **Port / Channel** (auto-detected; click **Refresh** if your device
+   is not listed).
+3. Set **Speed** to match your CAN bus (500 kbps is the most common for automotive).
+4. Set **Mode**: Normal for monitoring, Silent to listen without transmitting.
+5. Set **Frame Type**: *Auto* lets the tool detect Standard vs. Extended frames;
+   choose manually if you know the bus type.
+6. Press **F2** to connect.
 
-## Known Hardware Limitations
+### F-Key Reference
 
-| Limitation | Details |
+| Key | Action |
 |---|---|
-| One frame type at a time | Waveshare protocol byte 4: `0x01` Std or `0x02` Ext, no combined mode |
-| No CAN FD support | The USB-CAN-A is a classic CAN (ISO 11898) adapter, max 1 Mbit/s |
-| Serial baud fixed at 2 Mbit/s | USB ↔ dongle communication speed is fixed in hardware |
-| Same CAN-ID in Std and Ext | If a Standard and Extended frame share the same numeric ID, they occupy the same row in the monitor (latent issue, rare in practice) |
+| **F2** | Connect to hardware |
+| **F3** | Disconnect |
+| **F4** | Message Details — expand a selected CAN-ID |
+| **F5** | Refresh port list |
+| **F6** | Fullscreen Monitor with Byte Inspector |
+| **F7** | Signal Discovery screen |
+| **F8** | Toggle Connection Panel |
+| **Space** | Pause / resume live display |
+| **Delete** | Clear monitor table |
+| **S** | Cycle sort mode (by ID / Rate / Count) |
+| **F** | Focus filter input |
+| **Q** | Quit |
 
----
+### Main Monitor Table
 
-## File Overview
+Once connected, the monitor shows a live table — one row per CAN-ID:
 
-| File | Description |
+| Column | Description |
 |---|---|
-| `can_tui.py` | Main TUI application — all screens, timers, UI logic |
-| `waveshare_can.py` | Low-level Waveshare dongle driver — serial protocol, RX thread |
-| `can_log_exporter.py` | Multi-format trace export module (CSV / ASC / TRC / BLF) |
-| `can_diagnostic_tool.py` | Standalone CLI diagnostic tool (independent of TUI) |
-| `example_CAN.dbc` | Example DBC file for testing signal decoding |
+| CAN-ID | Message identifier (hex) |
+| DLC | Data Length Code (0–8 bytes) |
+| Data | Payload bytes in hex — **yellow** = recently changed, **red** = stale (>10 s) |
+| Rate | Frames per second for this ID |
+| Count | Total frames received |
+| Signal | Decoded signal name from DBC (if loaded) |
+
+### Signal Discovery (F7)
+
+Signal Discovery helps you find which CAN-IDs change when you interact with
+a vehicle component (press a button, turn a knob, etc.).
+
+1. **[O] Observe** — captures baseline bus noise. Operate the bus normally
+   without touching the target component. Press **[O]** again to stop observing.
+2. **[C] Capture** — takes a snapshot of the current bus state.
+   Trigger your target action, then press **[C]** again for a second snapshot.
+3. The results table shows byte-level differences between snapshots,
+   filtered against the noise baseline. IDs already covered by your DBC are
+   marked accordingly.
+
+### Trace Recording
+
+The **Trace** tab records every frame with a relative timestamp.
+
+- **[R]** Start recording / **[R]** Stop
+- **[P]** Pause / resume without losing frames
+- **[S]** Scroll-to-live toggle
+- **Export** button opens a save dialog — choose ASC, TRC, BLF, or CSV
+
+### DBC Signal Decoding
+
+Load a `.dbc` file from the **DBC** tab or via `--dbc` on the command line.
+Once loaded, decoded signal values appear in the main monitor and in the
+Fullscreen Monitor signal list (F6). The DBC tab shows all messages and
+their decode coverage.
+
+### Transmit (TX)
+
+The **TX** tab allows sending frames manually or cyclically.
+
+- Enter a CAN-ID (hex), DLC, data bytes, and an optional period (ms).
+- Leave period empty for single-shot transmission.
+- Named cyclic tasks appear in the task list and can be stopped individually.
+
+### Fullscreen Monitor + Byte Inspector (F6)
+
+Fullscreen monitor shows the live signal table on the left.
+On the right, the **Byte Inspector** renders the selected message as an
+8-byte hex grid with per-byte change highlighting. Navigate with arrow keys,
+select bytes with **Space**, and see multi-byte integer / float decodes
+(Big-Endian and Little-Endian) in the panel below.
 
 ---
 
-## Version History
+## Features
 
-| Version | Date | Highlights |
+- Live monitor — one row per CAN-ID, byte-change highlighting, stale detection
+- Signal Discovery with noise-baseline filtering (F7)
+- DBC file support via `cantools` — signal decode in monitor and fullscreen view
+- Byte Inspector — hex grid + UInt/Int/Float BE/LE decode with scaling (x0.1/0.01/0.001)
+- Frame filtering — whitelist/blacklist by CAN-ID
+- Trace recording with PCAN-View-style controls
+- Log export: **ASC** (Vector CANalyzer), **TRC** (PCAN-View v1.1), **BLF** (Vector binary), **CSV**
+- Cyclic and single-shot frame transmission
+- Bus-load bar and per-ID statistics
+- Auto frame-type detection (Standard vs. Extended)
+- Cross-platform: Ubuntu Linux + Windows 11
+
+---
+
+## Project Architecture
+
+```
+can_tui.py              — Textual TUI application (main entry point)
+     │
+     ├── waveshare_can.py   — Waveshare USB-CAN-A backend (serial protocol)
+     ├── peak_can.py        — PEAK PCAN-USB backend (python-can / socketcan)
+     │        └── Both backends expose an identical public API so the
+     │            frontend never needs to know which hardware is active.
+     │
+     ├── can_log_exporter.py — Export engine (ASC / TRC / BLF / CSV)
+     └── theme_midnight.py   — UI colour theme constants
+```
+
+### Hardware Backend Contract
+
+Both `WaveshareCAN` and `PeakCAN` expose the same interface:
+
+```python
+can.open()                          # → bool
+can.setup(speed, mode, frame_type)  # → bool
+can.start_receiver(callback)        # callback(CANFrame)
+can.send(can_id, data, is_extended) # → bool
+can.send_cyclic(can_id, data, is_extended, period_ms, task_name)
+can.stop_cyclic(task_name)
+can.close()
+```
+
+Shared data types (`CANFrame`, `CANSpeed`, `CANMode`, `CANFrameType`) are
+defined once in `waveshare_can.py` and imported by `peak_can.py` and
+`can_tui.py`. To add a new hardware backend, implement the contract above
+and add it to the `HardwareType` enum and `HARDWARE_OPTIONS` list in
+`can_tui.py`.
+
+---
+
+## Developer: Using waveshare_can.py Standalone
+
+`waveshare_can.py` has no dependency on the TUI and can be used independently
+in any Python project.
+
+```python
+from waveshare_can import WaveshareCAN, CANFrame, CANSpeed, CANMode, CANFrameType
+
+# --- Open and configure ---
+can = WaveshareCAN(port="/dev/ttyUSB0")   # Windows: port="COM3"
+can.open()
+can.setup(
+    speed=CANSpeed.SPEED_500K,
+    mode=CANMode.NORMAL,
+    frame_type=CANFrameType.EXTENDED,
+)
+
+# --- Receive frames via callback ---
+def on_frame(frame: CANFrame):
+    print(f"ID=0x{frame.can_id:X}  data={frame.data.hex()}  ext={frame.is_extended}")
+
+can.start_receiver(on_frame)
+
+# --- Or poll the queue directly ---
+import queue, time
+time.sleep(0.5)
+while not can.rx_queue.empty():
+    frame: CANFrame = can.rx_queue.get_nowait()
+    print(frame)   # uses CANFrame.__str__()
+
+# --- Send a frame ---
+can.send(can_id=0x123, data=bytes([0x01, 0x02, 0x03]), is_extended=False)
+
+# --- Send cyclically (every 100 ms) ---
+can.send_cyclic(
+    can_id=0x200,
+    data=bytes([0xDE, 0xAD]),
+    is_extended=False,
+    period_ms=100,
+    task_name="heartbeat",
+)
+time.sleep(1)
+can.stop_cyclic("heartbeat")
+
+# --- Clean up ---
+can.close()
+```
+
+### CANFrame Attributes
+
+| Attribute | Type | Description |
 |---|---|---|
-| v0.9.1 | 2026-02-19 | Timer optimisations, blinking REC indicator |
-| v1.0.0 | 2026-02-22 | Multi-format trace export (CSV / ASC / TRC / BLF), format selector |
-| v1.1.0 | 2026-02-22 | Signal Discovery screen (F7), Stale Value Highlighting (10 s) |
-| v1.2.0 | 2026-02-22 | `CANFrameType` enum, Frame Type selector, Auto-Detection on connect |
-| v1.3.0 | 2026-02-22 | Discovery Observe phase: noise baseline, `[o]` key, noise filtering |
+| `can_id` | `int` | CAN identifier (raw, without extended flag) |
+| `data` | `bytes` | Payload (0–8 bytes) |
+| `is_extended` | `bool` | True = 29-bit extended frame |
+| `timestamp` | `float` | `time.time()` at receive |
+
+### CANSpeed Values
+
+`SPEED_5K` `SPEED_10K` `SPEED_20K` `SPEED_50K` `SPEED_100K` `SPEED_125K`
+`SPEED_200K` `SPEED_250K` `SPEED_400K` `SPEED_500K` `SPEED_800K` `SPEED_1M`
+
+### CANMode Values
+
+| Value | Description |
+|---|---|
+| `NORMAL` | Standard bidirectional operation |
+| `SILENT` | Listen-only, no ACK transmitted |
+| `LOOPBACK` | Internal loopback for testing |
+| `LOOPBACK_SILENT` | Loopback without ACK |
 
 ---
 
-## ToDo / Roadmap
+## Developer: Using peak_can.py Standalone
 
-The following features are planned but not yet implemented, roughly in
-priority order:
+`peak_can.py` mirrors the `WaveshareCAN` API exactly. Replace `WaveshareCAN`
+with `PeakCAN` and use the appropriate channel name for your platform:
 
-**Signal Discovery**
-- **Soft noise marking (Option A)** — instead of hard-filtering noise IDs,
-  mark them with `~` status and allow toggling their visibility with a key.
-  Currently noise IDs are always hidden (strict mode only).
-- **Byte-level DBC coverage check** — for known messages, flag bytes that are
-  not covered by any signal definition as `~ Undefined byte`. Currently the
-  status is binary (message known / unknown), but a message can have undocumented
-  signals occupying bytes that the DBC does not define.
-- **Bit-diff display** — for changed bytes, show which individual bits changed
-  (e.g. `0x1F → 0x2F  bit 4↓ bit 5↑`). High value for manual reverse
-  engineering without a DBC.
-- **Signal value decoding in results** — for known messages with a DBC loaded,
-  decode and display signal values (VORHER/NACHHER) alongside byte values.
-- **CSV / JSON export** of Discovery results.
+```python
+from peak_can import PeakCAN, detect_peak_channels
+from waveshare_can import CANSpeed, CANMode, CANFrameType
 
-**Monitor**
-- **Configurable stale timeout** — currently fixed at 10 seconds (`STALE_TIMEOUT_S`).
-- **CAN-ID collision handling** — Standard and Extended frames with the same
-  numeric ID currently share one monitor row. Use `(can_id, is_extended)` tuple
-  as the store key.
+channels = detect_peak_channels()   # ['can0'] on Linux, ['PCAN_USBBUS1'] on Windows
+print("Available channels:", channels)
 
-**Connection**
-- **Configurable Auto-Detection timeout** — currently fixed at 3 seconds
-  (`AUTO_DETECT_TIMEOUT_S`) per frame type.
+can = PeakCAN(channel=channels[0])
+can.open()
+can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL,
+          frame_type=CANFrameType.EXTENDED)
+can.start_receiver(lambda f: print(f))
+```
 
-**Export / Analysis**
-- **Bit-level visualisation** — heatmap of which bits change most frequently
-  across a recording session.
-- **Replay** — send back a recorded trace to the bus for stimulus/response
-  testing.
+---
+
+## Known Limitations
+
+### Waveshare USB-CAN-A
+
+- **Standard OR Extended frames only** — the dongle hardware accepts one frame
+  type per session. Auto-Detection picks the correct type at connect time.
+  Buses that mix Standard and Extended frames on the same session are not
+  fully supported on this device.
+- **No hardware timestamps** — timestamps are assigned by the host CPU on
+  receive. Precision timing analysis (inter-frame gaps < ~1 ms) is not reliable.
+- **No CAN FD support** — the dongle is limited to classical CAN (max 1 Mbps,
+  8-byte payload).
+- **Throughput limit** — the USB serial bridge runs at 2 Mbps which limits
+  practical sustained throughput on heavily loaded buses.
+
+### PEAK PCAN-USB
+
+- CAN FD is not yet supported in this tool (hardware capability exists).
+- Silent mode on Linux socketcan uses local loopback disable as an approximation;
+  behaviour may differ slightly from the Windows PCAN driver.
+
+---
+
+## Roadmap
+
+- UDS / ISO-TP protocol layer (ISO 14229 request/response)
+- Bit-flip visualizer and entropy heatmap for signal hypothesis
+- OBD-II correlation for known PID mapping
+- ESP32-S3 + MCP2515 backend (WiFi/Bluetooth access)
+- CAN FD support (PEAK hardware)
+- Fuzzing / frame injection workflow
+
+---
+
+## Contributing
+
+Pull requests are welcome. Please follow **PEP 8** for all Python code.
+Open an issue first for larger feature additions so we can align on the
+approach before you invest the time.
+
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
