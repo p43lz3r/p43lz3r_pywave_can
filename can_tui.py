@@ -1,4 +1,71 @@
 #!/usr/bin/env python3
+# 2026-02-26 15:00 v2.0.10 - Bugfix: byte index header misaligned because
+#                            center() was applied to string including Rich markup
+#                            tags. Fixed: center plain text first, then wrap markup.
+# 2026-02-26 14:00 v2.0.9 - ByteInspectorWidget: binary sub-table (bi-binary-grid)
+#                           with dynamic height, one row per selected byte.
+#                           ASCII row added to decode DataTable.
+#                           Nibble separator after byte 3 in hex/dec grid.
+#                           COL_W reduced to 4 for compact layout.
+# 2026-02-26 02:00 v2.0.8 - Refactor: ByteInspectorWidget rewritten from Static
+#                           to Widget with DataTable decode section. Professional
+#                           3-column layout (Type|BE|LE) matching CANalyzer/PCAN-View.
+#                           No more Rich markup in data cells = no MarkupError possible.
+# 2026-02-26 01:00 v2.0.7 - Bugfix: MarkupError crash in _decode_bytes.
+#                           n_label wrapped in [...] was parsed as Rich markup tag.
+#                           Changed to (...) — parentheses are not markup syntax.
+# 2026-02-26 00:00 v2.0.6 - Bugfix: F6 crash on Ubuntu (and Windows) when pressing
+#                           Esc/Q to leave the fullscreen monitor. Root cause:
+#                           MonitorFullScreen had no on_unmount() so _refresh_timer
+#                           fired after widget teardown causing NoMatches /
+#                           RowDoesNotExist. Fixed: on_unmount() stops the timer;
+#                           _refresh_tables() wrapped in try/except as safety net.
+# 2026-02-25 23:00 v2.0.5 - Bugfix: Integer values in Byte Inspector used :, (thousands
+#                           separator) making them look like floats. Removed separator.
+# 2026-02-25 22:00 v2.0.4 - Feature: scaling row x0.1/x0.01/x0.001 in ByteInspector.
+#                           Matches Tkinter reference tool. 1-4 bytes, unsigned BE+LE.
+# 2026-02-25 21:00 v2.0.3 - Bugfix: hex/dec columns misaligned under byte index header.
+#                           _render_grid: fixed 5-char column width for every cell state
+#                           (normal/cursor/selected/changed) so markup tags never affect
+#                           visible column width. All three rows always align perfectly.
+#                           _decode_bytes: replaced :g float format with explicit
+#                           fixed/scientific formatter (_fmt_float); avoids unexpected
+#                           scientific notation switches. Labels renamed UInt/Int for
+#                           clarity. Float hint updated for n<4 / 4<n<8 cases.
+# 2026-02-25 20:00 v2.0.2 - Bugfix: ByteInspector shows no data.
+#                           _refresh_inspector: RowKey.value used correctly to
+#                           resolve CAN-ID from DataTable cursor row.
+#                           _toggle_row_by_key now triggers inspector immediately.
+#                           CSS: #fs-signal-table height 55%, #byte-inspector-panel
+#                           height 45% with height:1fr grid for full use of space.
+# 2026-02-25 19:00 v2.0.1 - Bugfix: MarkupError crash on F6 open.
+#                           Unicode arrows (←→) in ByteInspector title Static were
+#                           interpreted as Rich markup tags by Textual's compositor,
+#                           causing MarkupError during layout reflow. Fixed by adding
+#                           markup=False to the byte-inspector-title Static widget
+#                           and replacing arrows with ASCII equivalents (</> notation).
+# 2026-02-25 18:00 v2.0.0 - Byte Inspector added to F6 Fullscreen Monitor (Live Monitor tab).
+#                           New ByteInspectorWidget renders an 8-byte hex grid with:
+#                             - Per-byte change highlighting (yellow flash, fades to normal)
+#                             - Keyboard navigation: Left/Right arrows to move cursor,
+#                               Space to toggle byte selection, Shift+Right for range select
+#                             - Decode panel below grid: BE/LE integer, Float32/64, Binary
+#                             - [P] key pauses grid live-update while selection is active
+#                           fs-right now uses 3-zone vertical layout:
+#                             1. LIVE DECODED SIGNALS  (1fr, scrollable DataTable)
+#                             2. BYTE INSPECTOR        (fixed 14 rows, follows cursor row)
+#                             3. DECODE RESULTS        (fixed 3 rows, shows selected bytes)
+#                           Signals DataTable gains proper scrollability with multiple IDs.
+# 2026-02-25 12:00 v1.9.0 - DBC Decoder moved from F4 Details to F6 Fullscreen Monitor.
+#                           MonitorFullScreen now has two tabs: Live Monitor + DBC Decoder.
+#                           F4 Details reduced to: Event Log, Statistics, Trace.
+#                           All DBC backend methods redirected to _fullscreen_monitor ref.
+#                           Shortcuts and status bar updated accordingly.
+#                           Collapsed: single summary line (port · speed · mode).
+#                           Auto-collapses on connect, auto-expands on disconnect.
+#                           Two-column compact layout in expanded state (3 form rows
+#                           instead of 5): row1=HW+Port/Channel, row2=Speed+Mode+Frames,
+#                           row3=Connect+Disconnect buttons.
 # 2026-02-24 14:00 v1.7.0 - PEAK PCAN-USB hardware support added.
 #                           New "Hardware" selector in ConnectionPanel:
 #                           Waveshare USB-CAN-A / PEAK PCAN-USB.
@@ -48,9 +115,11 @@ Optional: python-can               (pip install python-can) – required for PEA
 """
 
 import argparse
+import math
 import os
 import platform
 import glob
+import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -61,6 +130,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from rich.text import Text
 
 from textual.app import App, ComposeResult
+from textual.widget import Widget
 from textual.screen import Screen, ModalScreen
 from textual.containers import Horizontal, Container, Vertical, ScrollableContainer
 from textual.widgets import (
@@ -100,7 +170,7 @@ from can_log_exporter import ExportFormat, export_records
 # Application version – single source of truth referenced by SUB_TITLE,
 # _update_rec_indicator() and DiscoveryScreen.action_pop_screen().
 # ---------------------------------------------------------------------------
-_APP_VERSION = "v1.6.0"
+_APP_VERSION = "v2.0.11"
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +188,7 @@ TIMER_MONITOR_S = 0.2   # Monitor table refresh
 TIMER_STATS_S = 2.0     # Statistics panel refresh
 TIMER_TRACE_S = 0.2     # Trace flush to DataTable
 TIMER_DBC_S = 1.0       # DBC decoded signals refresh
+TIMER_INSPECTOR_S = 0.25  # Byte Inspector grid refresh
 
 # ---------------------------------------------------------------------------
 # Misc tuning constants
@@ -182,9 +253,9 @@ MODE_OPTIONS: List[Tuple[str, CANMode]] = [
 
 # "Auto" is represented as None – triggers Auto-Detection on connect
 FRAME_TYPE_OPTIONS: List[Tuple[str, Optional[CANFrameType]]] = [
-    ("Auto-Detect", None),
-    ("Extended (29-bit)", CANFrameType.EXTENDED),
-    ("Standard (11-bit)", CANFrameType.STANDARD),
+    ("Auto", None),
+    ("Ext.", CANFrameType.EXTENDED),
+    ("Std.", CANFrameType.STANDARD),
 ]
 
 # Seconds to wait for frames before switching frame type during Auto-Detection
@@ -835,10 +906,12 @@ Footer {{ dock: bottom; background: {t["footer_bg"]}; color: {t["footer_fg"]}; }
 }}
 
 ConnectionPanel {{
-    border: solid {t["border"]}; padding: 1;
+    border: solid {t["border"]}; padding: 0 1;
     height: auto; background: {t["bg"]}; color: {t["fg"]};
     margin-bottom: 1;
 }}
+#conn-form   {{ height: auto; padding-top: 1; }}
+#conn-summary {{ display: none; }}  /* shown only when collapsed */
 MonitorPanel {{
     border: solid {t["border"]}; padding: 1;
     height: 1fr; background: {t["bg"]};
@@ -866,11 +939,29 @@ FilterPanel {{
 .filter-row  {{ height: 3; align-vertical: middle; }}
 .send-row    {{ height: 3; align-vertical: middle; margin-bottom: 0; }}
 
+/* Compact two-column connection form rows */
+.form-row-compact  {{ height: 3; align-vertical: middle; margin-bottom: 0; }}
+.conn-subrow       {{ width: 1fr; align-vertical: middle; }}
+.form-label-sm     {{ width: 5; margin-left: 1; margin-right: 1;padding-top: 1; color: {t["accent"]}; }}
+
+/* Collapsed summary bar */
+.conn-summary {{
+    height: 1;
+    color: {t["accent"]};
+    padding: 0 1;
+    text-style: bold;
+}}
+
+/* Small icon button (↺ refresh) */
+.btn-icon {{ width: 3; min-width: 3; padding: 0; margin-left: 1;
+             background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
+
 .form-label    {{ width: 8; padding-top: 1; color: {t["accent"]}; }}
 .send-label    {{ width: 7; padding-top: 1; color: {t["accent"]}; }}
 .send-label-sm {{ width: 5; padding-top: 1; color: {t["accent"]}; }}
 .send-label-md {{ width: 8; padding-top: 1; color: {t["accent"]}; }}
 
+.button-ref {{ margin-left: 7; min-width:12; }}
 .button-row        {{ height: auto; margin-top: 1; align-horizontal: center; }}
 .button-row Button {{ margin: 0 1; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
 
@@ -884,12 +975,12 @@ FilterPanel {{
     color: {t["ok"]}; text-style: bold; text-align: center; margin-bottom: 1;
 }}
 
-#port-select       {{ width: 1fr; }}
-#speed-select      {{ width: 1fr; }}
-#mode-select       {{ width: 1fr; }}
-#frame-type-select {{ width: 1fr; }}
-#hardware-select   {{ width: 1fr; }}
-#peak-channel-select {{ width: 1fr; }}
+#port-select       {{ width: 25; }}
+#speed-select      {{ width: 28; }}
+#mode-select       {{ width: 25; }}
+#frame-type-select {{ width: 12; }}
+#hardware-select   {{ width: 28; }}
+#peak-channel-select {{ width: 25; }}
 
 Select {{
     background: {t["select_bg"]};
@@ -918,8 +1009,6 @@ Select > SelectOverlay > OptionList > .option-list--option-hover {{
     background: {t["select_highlight_bg"]};
     color: {t["select_highlight_fg"]};
 }}
-
-#btn-refresh      {{ width: auto; min-width: 13; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
 
 #filter-input     {{ width: 1fr; background: {t["panel_dark_bg"]}; color: {t["fg"]}; }}
 #btn-filter-mode  {{ width: auto; min-width: 12; background: {t["btn_bg"]}; color: {t["btn_fg"]}; }}
@@ -989,10 +1078,13 @@ TabPane {{ padding: 1; background: {t["bg"]}; }}
 #trace-elapsed {{ color: {t["fg"]}; }}
 
 MonitorFullScreen {{
-    layout: horizontal;
+    layout: vertical;
     padding: 1;
     background: {t["bg"]};
     color: {t["fg"]};
+}}
+#fs-monitor-pane {{
+    layout: horizontal; height: 1fr;
 }}
 #fs-left {{
     width: 40; height: 100%; layout: vertical;
@@ -1010,10 +1102,40 @@ MonitorFullScreen {{
     height: 1fr; background: {t["table_bg"]}; color: {t["fg"]};
 }}
 #fs-signal-table {{
-    height: 1fr; background: {t["table_bg"]}; color: {t["fg"]};
+    height: 55%; background: {t["table_bg"]}; color: {t["fg"]};
 }}
 #fs-hint {{
     height: 1; color: {t["hint"]}; text-align: center; margin-top: 1;
+}}
+/* Byte Inspector — occupies lower 45% of fs-right */
+#byte-inspector-panel {{
+    height: 45%; layout: vertical;
+    padding: 0 1; margin-top: 1;
+    background: {t["panel_dark_bg"]}; overflow: hidden;
+}}
+#byte-inspector-title {{
+    text-style: bold; color: {t["title_fg"]}; background: {t["title_bg"]};
+    padding: 0 1; width: 100%; text-align: center; height: 1;
+}}
+#byte-inspector-grid {{
+    height: 1fr; layout: vertical;
+    background: {t["panel_dark_bg"]};
+}}
+#bi-hex-grid {{
+    height: 3; color: {t["fg"]};
+    background: {t["panel_dark_bg"]}; margin-bottom: 1;
+}}
+#bi-binary-grid {{
+    height: auto; min-height: 2; color: {t["fg"]};
+    background: {t["panel_dark_bg"]};
+    border-top: dashed {t["border"]};
+    border-bottom: dashed {t["border"]};
+    margin-bottom: 1;
+}}
+#bi-decode-table {{
+    height: 1fr;
+    background: {t["panel_dark_bg"]};
+    color: {t["fg"]};
 }}
 
 DiscoveryScreen {{
@@ -1186,9 +1308,10 @@ SHORTCUTS_MAIN: List[Tuple[str, str]] = [
     ("F1", "Help"),
     ("F2", "Connect"),
     ("F3", "Disconnect"),
-    ("F5", "Refresh Ports"),
+    ("F5", "Refresh Ports / Channels"),
+    ("F8", "Toggle Connection Panel"),
     ("F6", "Fullscreen Monitor"),
-    ("F4", "Details (Log / Stats / DBC / Trace)"),
+    ("F4", "Details (Log / Stats / Trace)"),
     ("Space", "Pause / Resume Monitor"),
     ("Del", "Clear Monitor"),
     ("s", "Cycle Sort Mode"),
@@ -1200,10 +1323,6 @@ SHORTCUTS_DETAILS: List[Tuple[str, str]] = [
     ("Details Screen", ""),
     ("Esc / q", "Back to Main"),
     ("", ""),
-    ("DBC Decoder tab", ""),
-    ("Load button / Enter", "Load .dbc file from path input"),
-    ("Unload button", "Clear loaded DBC database"),
-    ("", ""),
     ("Trace tab", ""),
     ("Record", "Start recording frames"),
     ("Pause", "Freeze display; frames keep recording, shown on Resume"),
@@ -1213,9 +1332,23 @@ SHORTCUTS_DETAILS: List[Tuple[str, str]] = [
 ]
 
 SHORTCUTS_FULLSCREEN: List[Tuple[str, str]] = [
-    ("Fullscreen Monitor", ""),
+    ("Fullscreen Monitor  (F6)", ""),
     ("Esc / q", "Back to Main"),
-    ("Left click", "Toggle ID selection"),
+    ("", ""),
+    ("Live Monitor tab", ""),
+    ("Left click / Space / Enter", "Toggle ID selection"),
+    ("", ""),
+    ("Byte Inspector (Tab to focus)", ""),
+    ("Tab", "Switch focus: ID list <-> Inspector"),
+    ("< >", "Move byte cursor"),
+    ("Shift+< >", "Extend byte selection (range)"),
+    ("Space", "Toggle byte selection"),
+    ("P", "Pause / Resume live update"),
+    ("Esc", "Clear selection"),
+    ("", ""),
+    ("DBC Decoder tab", ""),
+    ("Load button / Enter", "Load .dbc file from path input"),
+    ("Unload button", "Clear loaded DBC database"),
     ("F1", "Help"),
 ]
 
@@ -1290,67 +1423,83 @@ class ShortcutsScreen(ModalScreen):
 
 
 class ConnectionPanel(Container):
-    """Panel holding hardware, port/channel, speed, mode selectors and Connect/Disconnect buttons."""
+    """Collapsible connection panel.
+
+    Expanded : two-column compact form (3 rows) + Connect/Disconnect buttons.
+    Collapsed: single summary line showing current settings + F8 hint.
+    F8 toggles between states.  Auto-collapses on connect, expands on disconnect.
+    """
 
     def compose(self) -> ComposeResult:
         """Build the connection panel layout."""
-        yield Static("CONNECTION", classes="panel-title")
-        # --- Hardware selector ---
-        with Horizontal(classes="form-row"):
-            yield Label("HW:", classes="form-label")
-            yield Select(
-                HARDWARE_OPTIONS,
-                id="hardware-select",
-                value=HardwareType.WAVESHARE,
-                allow_blank=False,
-            )
-        # --- Waveshare: serial port row (visible by default) ---
-        with Horizontal(classes="form-row", id="row-port"):
-            yield Label("Port:", classes="form-label")
-            ports = detect_serial_ports()
-            yield Select(
-                [(p, p) for p in ports],
-                id="port-select",
-                value=ports[0] if ports else Select.BLANK,
-                allow_blank=False,
-            )
-            yield Button("Refresh [F5]", id="btn-refresh", variant="default")
-        # --- PEAK: channel row (hidden by default) ---
-        with Horizontal(classes="form-row", id="row-peak-channel"):
-            yield Label("Channel:", classes="form-label")
-            peak_channels = detect_peak_channels() if _PEAK_AVAILABLE else []
-            peak_opts = (
-                [(ch, ch) for ch in peak_channels] if peak_channels
-                else _PEAK_CHANNEL_OPTIONS
-            )
-            peak_default = peak_channels[0] if peak_channels else "PCAN_USBBUS1"
-            yield Select(
-                peak_opts,
-                id="peak-channel-select",
-                value=peak_default,
-                allow_blank=False,
-            )
-        with Horizontal(classes="form-row"):
-            yield Label("Speed:", classes="form-label")
-            yield Select(SPEED_OPTIONS, id="speed-select",
-                         value=CANSpeed.SPEED_500K, allow_blank=False)
-        with Horizontal(classes="form-row"):
-            yield Label("Mode:", classes="form-label")
-            yield Select(MODE_OPTIONS, id="mode-select",
-                         value=CANMode.NORMAL, allow_blank=False)
-        # Frame Type row – hidden when PEAK is selected
-        with Horizontal(classes="form-row", id="row-frame-type"):
-            yield Label("Frames:", classes="form-label")
-            yield Select(
-                FRAME_TYPE_OPTIONS,
-                id="frame-type-select",
-                value=None,   # Auto-Detect default
-                allow_blank=False,
-            )
-        with Horizontal(classes="button-row"):
-            yield Button("Connect [F2]", id="btn-connect", variant="success")
-            yield Button("Disconnect [F3]", id="btn-disconnect",
-                         variant="error", disabled=True)
+        # ── Collapsed summary bar (hidden by default, shown when collapsed) ──
+        yield Static(
+            "─ [F8] Connection Settings",
+            id="conn-summary",
+            classes="conn-summary",
+        )
+
+        # ── Expanded form ────────────────────────────────────────────────────
+        with Vertical(id="conn-form"):
+            yield Static("CONNECTION  [F8]", classes="panel-title")
+
+            # Row 1: Hardware  |  Port or Channel + Refresh
+            with Horizontal(classes="form-row-compact"):
+                yield Label("HW:", classes="form-label-sm")
+                yield Select(
+                    HARDWARE_OPTIONS,
+                    id="hardware-select",
+                    value=HardwareType.WAVESHARE,
+                    allow_blank=False,
+                )
+                # Port sub-row (Waveshare)
+                with Horizontal(id="row-port", classes="conn-subrow"):
+                    yield Label("Port:", classes="form-label-sm")
+                    yield Select(
+                        [(p, p) for p in detect_serial_ports()],
+                        id="port-select",
+                        value=(detect_serial_ports() or [Select.BLANK])[0],
+                        allow_blank=False,
+                    )
+                    yield Button("Refresh", id="btn-refresh", classes="button-ref", variant="success")
+                # Channel sub-row (PEAK, hidden by default)
+                with Horizontal(id="row-peak-channel", classes="conn-subrow"):
+                    peak_channels = detect_peak_channels() if _PEAK_AVAILABLE else []
+                    peak_opts = (
+                        [(ch, ch) for ch in peak_channels]
+                        if peak_channels else _PEAK_CHANNEL_OPTIONS
+                    )
+                    peak_default = peak_channels[0] if peak_channels else "PCAN_USBBUS1"
+                    yield Label("USB:", classes="form-label-sm")
+                    yield Select(
+                        peak_opts,
+                        id="peak-channel-select",
+                        value=peak_default,
+                        allow_blank=False,
+                    )
+
+            # Row 2: Speed  |  Mode  |  Frames (hidden for PEAK)
+            with Horizontal(classes="form-row-compact"):
+                yield Label("Spd:", classes="form-label-sm")
+                yield Select(SPEED_OPTIONS, id="speed-select",
+                             value=CANSpeed.SPEED_500K, allow_blank=False)
+                yield Label("Mode:", classes="form-label-sm")
+                yield Select(MODE_OPTIONS, id="mode-select",
+                             value=CANMode.NORMAL, allow_blank=False)
+                with Horizontal(id="row-frame-type", classes="conn-subrow"):
+                    yield Label("Fr:", classes="form-label-sm")
+                    yield Select(
+                        FRAME_TYPE_OPTIONS,
+                        id="frame-type-select",
+                        value=None,
+                        allow_blank=False,
+                    )
+
+            # Row 3: Buttons
+            with Horizontal(classes="button-row"):
+                yield Button("Connect [F2]", id="btn-connect", variant="success")
+                yield Button("Disconnect [F3]", id="btn-disconnect",
+                             variant="error", disabled=True)
 
 
 class StatusPanel(Container):
@@ -1582,8 +1731,6 @@ class DetailsScreen(Screen):
                 yield Log(id="event-log", max_lines=500)
             with TabPane("Statistics", id="tab-stats"):
                 yield StatisticsPanel()
-            with TabPane("DBC Decoder", id="tab-dbc"):
-                yield DBCPanel()
             with TabPane("Trace", id="tab-trace"):
                 yield TracePanel()
         yield Footer()
@@ -1609,12 +1756,330 @@ class DetailsScreen(Screen):
         self.app.action_show_shortcuts(context="details")  # type: ignore[attr-defined]
 
 
+class ByteInspectorWidget(Widget):
+    """TUI Byte Inspector – hex grid + binary sub-table + decode DataTable.
+
+    Layout (top to bottom inside #byte-inspector-grid):
+      bi-hex-grid     Static  – column index / hex / decimal rows
+      bi-binary-grid  Static  – bit view, one row per selected byte (dynamic height)
+      bi-decode-table DataTable – Type | Big Endian | Little Endian
+
+    Public API:
+        update_frame(data, changed_mask)
+        get_paused() -> bool
+    """
+
+    _T            = theme_midnight.THEME
+    _COL_NORMAL   = _T["fg"]
+    _COL_CHANGED  = _T["highlight"]
+    _COL_CURSOR   = _T["table_cursor_bg"]
+    _COL_SELECTED = "#ff9900"
+    _COL_HINT     = _T["hint"]
+    _COL_HEADER   = _T["table_header_fg"]
+
+    _ROW_UINT  = "uint"
+    _ROW_INT   = "int"
+    _ROW_SC1   = "sc1"
+    _ROW_SC2   = "sc2"
+    _ROW_SC3   = "sc3"
+    _ROW_FLOAT = "float"
+    _ROW_ASCII = "ascii"
+
+    BINDINGS = [
+        ("left",        "cursor_left",     "Prev byte"),
+        ("right",       "cursor_right",    "Next byte"),
+        ("shift+right", "extend_right",    "Extend sel"),
+        ("shift+left",  "extend_left",     "Extend sel"),
+        ("space",       "toggle_select",   "Select byte"),
+        ("p",           "toggle_pause",    "Pause/Resume"),
+        ("escape",      "clear_selection", "Clear sel"),
+    ]
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._data: bytes           = b""
+        self._changed_mask: List[bool] = []
+        self._cursor: int           = 0
+        self._selected: Set[int]    = set()
+        self._paused: bool          = False
+        self._anchor: Optional[int] = None
+        self._tbl_col_keys: list    = []
+
+    # ------------------------------------------------------------------
+    # Compose + mount
+    # ------------------------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="bi-hex-grid", markup=True)
+        yield Static(id="bi-binary-grid", markup=True)
+        yield DataTable(id="bi-decode-table", show_cursor=False,
+                        zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        tbl = self.query_one("#bi-decode-table", DataTable)
+        tbl.add_columns("Type", "Big Endian", "Little Endian")
+        self._tbl_col_keys = list(tbl.columns)
+        for rk, label in [
+            (self._ROW_UINT,  "Unsigned Int"),
+            (self._ROW_INT,   "Signed Int"),
+            (self._ROW_SC1,   "× 0.1"),
+            (self._ROW_SC2,   "× 0.01"),
+            (self._ROW_SC3,   "× 0.001"),
+            (self._ROW_FLOAT, "Float32/64"),
+            (self._ROW_ASCII, "ASCII"),
+        ]:
+            tbl.add_row(label, "–", "–", key=rk)
+        self._render_grid()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def update_frame(self, data: bytes, changed_mask: List[bool]) -> None:
+        """Receive a new CAN frame; ignored while paused."""
+        if self._paused:
+            return
+        self._data         = data
+        self._changed_mask = changed_mask
+        if self._data:
+            self._cursor = min(self._cursor, len(self._data) - 1)
+        self._render_grid()
+
+    def get_paused(self) -> bool:
+        """Return True when live update is paused."""
+        return self._paused
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _render_grid(self) -> None:
+        """Render hex grid, binary sub-table and decode DataTable."""
+        grid     = self.query_one("#bi-hex-grid",    Static)
+        bin_grid = self.query_one("#bi-binary-grid", Static)
+        n        = len(self._data)
+
+        if n == 0:
+            grid.update(
+                f"[{self._COL_HINT}]  No frame data – select a CAN-ID in the ID list.[/]"
+            )
+            bin_grid.update("")
+            self._clear_table()
+            return
+
+        COL_W = 4
+
+        # ── Row 0: column index header ─────────────────────────────────────
+        hdr_parts = []
+        for i in range(n):
+            sep  = "  " if i == 3 else ""
+            cell = f"{i:02d}".center(COL_W)  # pad first, then wrap markup
+            hdr_parts.append(f"[bold {self._COL_HEADER}]{cell}[/]{sep}")
+        hdr = "".join(hdr_parts)
+
+        # ── Row 1: hex values ──────────────────────────────────────────────
+        hex_parts = []
+        for i in range(n):
+            val        = self._data[i]
+            hx         = f"{val:02X}"
+            is_cursor  = (i == self._cursor)
+            is_sel     = (i in self._selected)
+            is_changed = (i < len(self._changed_mask) and self._changed_mask[i])
+            sep        = "  " if i == 3 else ""
+
+            if is_cursor:
+                cell = f"[reverse bold {self._COL_CURSOR}] {hx} [/]"
+            elif is_sel:
+                cell = f"[bold {self._COL_SELECTED}]{hx:^{COL_W}}[/]"
+            elif is_changed:
+                cell = f"[bold {self._COL_CHANGED}]{hx:^{COL_W}}[/]"
+            else:
+                cell = f"[{self._COL_NORMAL}]{hx:^{COL_W}}[/]"
+            hex_parts.append(f"{cell}{sep}")
+        hex_row = "".join(hex_parts)
+
+        # ── Row 2: decimal values ──────────────────────────────────────────
+        dec_parts = []
+        for i in range(n):
+            is_changed = (i < len(self._changed_mask) and self._changed_mask[i])
+            col        = self._COL_CHANGED if is_changed else self._COL_HINT
+            sep        = "  " if i == 3 else ""
+            dec_parts.append(f"[{col}]{str(self._data[i]):^{COL_W}}[/]{sep}")
+        dec_row = "".join(dec_parts)
+
+        pause_line = (
+            f"\n[bold {self._COL_CHANGED}]  PAUSED – press P to resume[/]"
+            if self._paused else ""
+        )
+        grid.update(f"{hdr}\n{hex_row}\n{dec_row}{pause_line}")
+
+        # ── Binary sub-table (dynamic height, one row per selected byte) ───
+        sel_sorted = sorted(self._selected) if self._selected else [self._cursor]
+        bin_lines  = [f"[bold {self._COL_HEADER}]Byte | 7 6 5 4 3 2 1 0[/]"]
+        for idx in sel_sorted:
+            if idx < n:
+                bits     = f"{self._data[idx]:08b}"
+                bits_fmt = " ".join(
+                    f"[{self._COL_NORMAL}]{b}[/]" for b in bits
+                )
+                bin_lines.append(
+                    f"[{self._COL_HINT}]{idx:02d}   |[/] {bits_fmt}"
+                )
+        bin_grid.update("\n".join(bin_lines))
+
+        # ── Decode table ───────────────────────────────────────────────────
+        sel_bytes = bytes([self._data[i] for i in sel_sorted if i < n])
+        if sel_bytes:
+            self._update_table(sel_bytes)
+        else:
+            self._clear_table()
+
+    def _fmt_float(self, v: float) -> str:
+        if math.isnan(v):  return "NaN"
+        if math.isinf(v):  return "+Inf" if v > 0 else "-Inf"
+        if v == 0.0:       return "0.0"
+        abs_v = abs(v)
+        if abs_v >= 1e6 or abs_v < 1e-3:
+            return f"{v:.4e}"
+        return f"{v:.6f}".rstrip("0").rstrip(".") or "0"
+
+    def _fmt_scale(self, val: int, factor: float) -> str:
+        x = val * factor
+        if x == 0.0: return "0.0"
+        abs_x = abs(x)
+        if abs_x >= 1e6 or abs_x < 1e-4:
+            return f"{x:.3e}"
+        return f"{x:.4f}".rstrip("0").rstrip(".") or "0"
+
+    def _update_table(self, data: bytes) -> None:
+        tbl = self.query_one("#bi-decode-table", DataTable)
+        ck  = self._tbl_col_keys
+        n   = len(data)
+
+        be_u = int.from_bytes(data, "big",    signed=False)
+        le_u = int.from_bytes(data, "little", signed=False)
+        be_s = int.from_bytes(data, "big",    signed=True)
+        le_s = int.from_bytes(data, "little", signed=True)
+
+        tbl.update_cell(self._ROW_UINT, ck[1], str(be_u), update_width=False)
+        tbl.update_cell(self._ROW_UINT, ck[2], str(le_u), update_width=False)
+        tbl.update_cell(self._ROW_INT,  ck[1], str(be_s), update_width=False)
+        tbl.update_cell(self._ROW_INT,  ck[2], str(le_s), update_width=False)
+
+        if 1 <= n <= 4:
+            for rk, f in [(self._ROW_SC1, 0.1),
+                          (self._ROW_SC2, 0.01),
+                          (self._ROW_SC3, 0.001)]:
+                tbl.update_cell(rk, ck[1], self._fmt_scale(be_u, f),
+                                update_width=False)
+                tbl.update_cell(rk, ck[2], self._fmt_scale(le_u, f),
+                                update_width=False)
+        else:
+            for rk in (self._ROW_SC1, self._ROW_SC2, self._ROW_SC3):
+                tbl.update_cell(rk, ck[1], "n/a (>4B)", update_width=False)
+                tbl.update_cell(rk, ck[2], "–",         update_width=False)
+
+        if n == 4:
+            try:
+                be_str = self._fmt_float(struct.unpack(">f", data)[0])
+                le_str = self._fmt_float(struct.unpack("<f", data)[0])
+            except Exception:
+                be_str = le_str = "err"
+            tbl.update_cell(self._ROW_FLOAT, ck[0], "Float32",     update_width=False)
+            tbl.update_cell(self._ROW_FLOAT, ck[1], be_str,         update_width=False)
+            tbl.update_cell(self._ROW_FLOAT, ck[2], le_str,         update_width=False)
+        elif n == 8:
+            try:
+                be_str = self._fmt_float(struct.unpack(">d", data)[0])
+                le_str = self._fmt_float(struct.unpack("<d", data)[0])
+            except Exception:
+                be_str = le_str = "err"
+            tbl.update_cell(self._ROW_FLOAT, ck[0], "Float64",     update_width=False)
+            tbl.update_cell(self._ROW_FLOAT, ck[1], be_str,         update_width=False)
+            tbl.update_cell(self._ROW_FLOAT, ck[2], le_str,         update_width=False)
+        else:
+            tbl.update_cell(self._ROW_FLOAT, ck[0], "Float32/64",  update_width=False)
+            tbl.update_cell(self._ROW_FLOAT, ck[1], "select 4B/8B", update_width=False)
+            tbl.update_cell(self._ROW_FLOAT, ck[2], "–",            update_width=False)
+
+        ascii_str = "".join(chr(b) if 32 <= b <= 126 else "." for b in data)
+        tbl.update_cell(self._ROW_ASCII, ck[1], ascii_str, update_width=False)
+        tbl.update_cell(self._ROW_ASCII, ck[2], "–",       update_width=False)
+
+    def _clear_table(self) -> None:
+        tbl = self.query_one("#bi-decode-table", DataTable)
+        ck  = self._tbl_col_keys
+        for rk in (self._ROW_UINT, self._ROW_INT, self._ROW_SC1,
+                   self._ROW_SC2, self._ROW_SC3, self._ROW_FLOAT,
+                   self._ROW_ASCII):
+            tbl.update_cell(rk, ck[1], "–", update_width=False)
+            tbl.update_cell(rk, ck[2], "–", update_width=False)
+        tbl.update_cell(self._ROW_FLOAT, ck[0], "Float32/64", update_width=False)
+
+    # ------------------------------------------------------------------
+    # Key actions
+    # ------------------------------------------------------------------
+
+    def action_cursor_left(self) -> None:
+        if self._data:
+            self._cursor = max(0, self._cursor - 1)
+            self._anchor = None
+            self._render_grid()
+
+    def action_cursor_right(self) -> None:
+        if self._data:
+            self._cursor = min(len(self._data) - 1, self._cursor + 1)
+            self._anchor = None
+            self._render_grid()
+
+    def action_extend_right(self) -> None:
+        if not self._data:
+            return
+        if self._anchor is None:
+            self._anchor = self._cursor
+        self._cursor = min(len(self._data) - 1, self._cursor + 1)
+        self._selected = set(range(min(self._anchor, self._cursor),
+                                   max(self._anchor, self._cursor) + 1))
+        self._render_grid()
+
+    def action_extend_left(self) -> None:
+        if not self._data:
+            return
+        if self._anchor is None:
+            self._anchor = self._cursor
+        self._cursor = max(0, self._cursor - 1)
+        self._selected = set(range(min(self._anchor, self._cursor),
+                                   max(self._anchor, self._cursor) + 1))
+        self._render_grid()
+
+    def action_toggle_select(self) -> None:
+        if self._cursor in self._selected:
+            self._selected.discard(self._cursor)
+        else:
+            self._selected.add(self._cursor)
+        self._anchor = None
+        self._render_grid()
+
+    def action_toggle_pause(self) -> None:
+        self._paused = not self._paused
+        self._render_grid()
+
+    def action_clear_selection(self) -> None:
+        self._selected.clear()
+        self._anchor = None
+        self._render_grid()
+
+    def can_focus(self) -> bool:  # type: ignore[override]
+        return True
+
+
 class MonitorFullScreen(Screen):
-    """Fullscreen split-view: left = ID list with selection, right = decoded signals."""
+    """F6 Fullscreen split-view: left = ID list, right = signals + Byte Inspector."""
 
     BINDINGS = [
         ("escape", "pop_screen", "Back"),
-        ("q", "pop_screen", "Back"),
+        ("q",      "pop_screen", "Back"),
+        ("tab",    "cycle_focus", "Switch focus"),
     ]
 
     # Column definitions
@@ -1622,20 +2087,35 @@ class MonitorFullScreen(Screen):
     SIG_COLS: Tuple[str, ...] = ("CAN-ID", "Name", "Signal", "Value", "Unit")
 
     def compose(self) -> ComposeResult:
-        """Build the fullscreen monitor layout."""
+        """Build the fullscreen monitor layout with Live Monitor and DBC Decoder tabs."""
         yield Header()
-        with Container(id="fs-left"):
-            yield Static("ID LIST  (Space = toggle)", classes="fs-title")
-            yield DataTable(id="fs-id-table", show_cursor=True)
-            yield Static("Space/Click to select  |  multiple allowed",
-                         id="fs-hint")
-        with Container(id="fs-right"):
-            yield Static("LIVE DECODED SIGNALS", classes="fs-title")
-            yield DataTable(id="fs-signal-table", show_cursor=False)
+        with TabbedContent(id="fs-tabs"):
+            with TabPane("Live Monitor", id="tab-fs-monitor"):
+                with Horizontal(id="fs-monitor-pane"):
+                    with Container(id="fs-left"):
+                        yield Static("ID LIST  (Space = toggle)", classes="fs-title")
+                        yield DataTable(id="fs-id-table", show_cursor=True)
+                        yield Static(
+                            "Space/Click: select  |  Tab: focus Inspector",
+                            id="fs-hint",
+                        )
+                    with Container(id="fs-right"):
+                        yield Static("LIVE DECODED SIGNALS", classes="fs-title")
+                        yield DataTable(id="fs-signal-table", show_cursor=False)
+                        # ── Byte Inspector ────────────────────────────────────
+                        with Container(id="byte-inspector-panel"):
+                            yield Static(
+                                "BYTE INSPECTOR  [Tab=focus  </>=cursor  Space=select  Shift+</>=range  P=pause  Esc=clear]",
+                                id="byte-inspector-title",
+                                markup=False,
+                            )
+                            yield ByteInspectorWidget(id="byte-inspector-grid")
+            with TabPane("DBC Decoder", id="tab-fs-dbc"):
+                yield DBCPanel()
         yield Footer()
 
     def on_mount(self) -> None:
-        """Initialise tables and cache column key lists."""
+        """Initialise tables, inspector, and cache column key lists."""
         id_tbl = self.query_one("#fs-id-table", DataTable)
         id_tbl.add_columns(*self.ID_COLS)
         id_tbl.cursor_type = "row"
@@ -1651,6 +2131,9 @@ class MonitorFullScreen(Screen):
         self._selected_ids: Set[int] = set()
         self._id_row_keys: Dict[int, str] = {}   # can_id → row_key string
 
+        # Track which CAN-ID is currently under the cursor (for Inspector)
+        self._cursor_can_id: Optional[int] = None
+
         # References injected by the main app after push
         self._store: Optional[CANFrameStore] = None
         self._dbc: Optional[DBCDatabase] = None
@@ -1660,16 +2143,37 @@ class MonitorFullScreen(Screen):
         # Give focus to the ID table so Space works immediately without a click
         self.call_after_refresh(lambda: id_tbl.focus())
 
+    def on_unmount(self) -> None:
+        """Cancel the refresh timer before the screen's widgets are destroyed.
+
+        Without this, the timer fires one final time after Textual has already
+        torn down the DataTable / ByteInspectorWidget nodes, causing a
+        NoMatches / RowDoesNotExist crash on both Windows and Ubuntu.
+        """
+        try:
+            self._refresh_timer.stop()
+        except Exception:
+            pass
+
     def _refresh_tables(self) -> None:
-        """Update the ID list and signal table from the live frame store."""
+        """Update the ID list, signal table, and Byte Inspector from the live frame store.
+
+        Wrapped in try/except: the Textual timer may fire one final time
+        between on_unmount() and full widget teardown; swallow any
+        NoMatches / RowDoesNotExist / AttributeError that results.
+        """
         if self._store is None:
             return
-        rows = self._store.read()
-        t = MIDNIGHT
-        fg = t["fg"]
-        highlight = t["highlight"]
-        self._refresh_id_table(rows, fg, highlight)
-        self._refresh_signal_table(rows, fg)
+        try:
+            rows = self._store.read()
+            t = MIDNIGHT
+            fg = t["fg"]
+            highlight = t["highlight"]
+            self._refresh_id_table(rows, fg, highlight)
+            self._refresh_signal_table(rows, fg)
+            self._refresh_inspector(rows)
+        except Exception:
+            pass  # Screen is being torn down; ignore stale timer callbacks
 
     def _refresh_id_table(self, rows: dict, fg: str, highlight: str) -> None:
         """Rebuild the left ID list table."""
@@ -1788,6 +2292,57 @@ class MonitorFullScreen(Screen):
                     key=row_key,
                 )
 
+    def _refresh_inspector(self, rows: dict) -> None:
+        """Push the cursor-row frame into the ByteInspectorWidget.
+
+        The inspector always shows the frame for the CAN-ID currently under
+        the table cursor (highlighted row), regardless of which IDs are
+        selected (selected IDs drive the signal table, not the inspector).
+        """
+        try:
+            inspector = self.query_one("#byte-inspector-grid", ByteInspectorWidget)
+            id_tbl = self.query_one("#fs-id-table", DataTable)
+        except Exception:
+            return
+
+        # RowKey objects in id_tbl.rows use the string CAN-ID as their value.
+        # Iterate to find the row at cursor_row index safely.
+        row_keys = list(id_tbl.rows.keys())
+        cursor_idx = id_tbl.cursor_row
+        if not row_keys or cursor_idx < 0 or cursor_idx >= len(row_keys):
+            return
+
+        # RowKey.value holds the key string we passed to add_row()
+        try:
+            rk_value = row_keys[cursor_idx].value  # RowKey → str
+            can_id = int(rk_value)
+        except (AttributeError, ValueError, TypeError):
+            # Fallback: try casting the RowKey itself directly
+            try:
+                can_id = int(str(row_keys[cursor_idx]))
+            except Exception:
+                return
+
+        self._cursor_can_id = can_id
+        entry = rows.get(can_id)
+        if entry is None:
+            return
+
+        frame = entry["frame"]
+        changed_mask = entry.get("changed_mask", [])
+        inspector.update_frame(bytes(frame.data), list(changed_mask))
+
+    def on_data_table_row_highlighted(
+        self, event: DataTable.RowHighlighted
+    ) -> None:
+        """Update the Byte Inspector whenever the cursor moves in the ID table."""
+        if event.data_table.id != "fs-id-table":
+            return
+        if self._store is None:
+            return
+        rows = self._store.read()
+        self._refresh_inspector(rows)
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter key on a row → toggle selection in the ID table."""
         if event.data_table.id == "fs-id-table":
@@ -1836,9 +2391,25 @@ class MonitorFullScreen(Screen):
             self._selected_ids.discard(can_id)
         else:
             self._selected_ids.add(can_id)
-        # Force immediate visual refresh
+        # Force immediate visual refresh (signals table + inspector)
         self._refresh_tables()
+        # Also update inspector immediately for the toggled ID so the user
+        # sees byte data right away without waiting for the next timer tick.
+        if self._store is not None:
+            rows = self._store.read()
+            self._refresh_inspector(rows)
 
+    def action_cycle_focus(self) -> None:
+        """Tab: cycle keyboard focus between ID table and Byte Inspector."""
+        try:
+            id_tbl   = self.query_one("#fs-id-table", DataTable)
+            inspector = self.query_one("#byte-inspector-grid", ByteInspectorWidget)
+        except Exception:
+            return
+        if self.focused is inspector:
+            id_tbl.focus()
+        else:
+            inspector.focus()
 
     def action_pop_screen(self) -> None:
         """Return to main screen, resume paused timers."""
@@ -2433,9 +3004,10 @@ class CANBusTUI(App):
     BINDINGS = [
         ("f2", "connect", "Connect"),
         ("f3", "disconnect", "Disconnect"),
-        ("f5", "refresh_ports", "Refresh Ports"),
+        ("f5", "refresh_ports", "Refresh"),
         ("f6", "show_fullscreen_monitor", "Monitor"),
         ("f7", "show_discovery", "Discovery"),
+        ("f8", "toggle_connection_panel", "Connection"),
         ("space", "toggle_pause", "Pause"),
         ("delete", "clear_monitor", "Clear"),
         ("s", "cycle_sort", "Sort"),
@@ -2454,6 +3026,7 @@ class CANBusTUI(App):
         self._startup_args: StartupArgs = startup_args or StartupArgs()
         self.can: Optional[object] = None   # WaveshareCAN or PeakCAN instance
         self._active_hardware: HardwareType = HardwareType.WAVESHARE
+        self._conn_panel_expanded: bool = True   # F8 toggle state
         self._fps_timer: Optional[Timer] = None
         self._status_timer: Optional[Timer] = None
         self._monitor_timer: Optional[Timer] = None
@@ -2549,7 +3122,7 @@ class CANBusTUI(App):
         self._log(f"Platform: {platform.system()} {platform.release()}")
         self._log(
             "F1=Help  F2=Connect  F3=Disconnect  F4=Details  "
-            "F6=Fullscreen Monitor  F7=Signal Discovery  Space=Pause  q=Quit"
+            "F6=Fullscreen Monitor / DBC  F7=Signal Discovery  F8=Connection  Space=Pause  q=Quit"
         )
 
         self._status_timer = self.set_interval(TIMER_STATUS_S, self._update_status_display)
@@ -2565,6 +3138,8 @@ class CANBusTUI(App):
         self.call_after_refresh(self._cache_main_widgets)
         # Hide PEAK-only rows on startup (Waveshare is default hardware)
         self.call_after_refresh(self._apply_hardware_row_visibility)
+        # Populate collapsed summary bar with initial selector values
+        self.call_after_refresh(self._update_conn_summary)
 
         # Apply CLI startup arguments after first render
         if (self._startup_args.port or self._startup_args.speed
@@ -2585,6 +3160,47 @@ class CANBusTUI(App):
             self.query_one("#row-port").display = not is_peak
             self.query_one("#row-peak-channel").display = is_peak
             self.query_one("#row-frame-type").display = not is_peak
+        except Exception:
+            pass
+
+    def action_toggle_connection_panel(self) -> None:
+        """F8 – Toggle the ConnectionPanel between expanded and collapsed."""
+        self._conn_panel_expanded = not self._conn_panel_expanded
+        self._apply_conn_panel_visibility()
+
+    def _apply_conn_panel_visibility(self) -> None:
+        """Show/hide conn-form vs. conn-summary based on _conn_panel_expanded."""
+        try:
+            self.query_one("#conn-form").display = self._conn_panel_expanded
+            self.query_one("#conn-summary").display = not self._conn_panel_expanded
+        except Exception:
+            pass
+
+    def _update_conn_summary(self) -> None:
+        """Refresh the collapsed summary line with current connection info."""
+        try:
+            port_w = self.query_one("#port-select", Select)
+            speed_w = self.query_one("#speed-select", Select)
+            mode_w = self.query_one("#mode-select", Select)
+
+            if self._active_hardware == HardwareType.PEAK:
+                ch = self.query_one("#peak-channel-select", Select).value
+                port_str = str(ch)
+            else:
+                port_str = str(port_w.value)
+
+            speed_str = next(
+                (lbl for lbl, v in SPEED_OPTIONS if v == speed_w.value), "?"
+            )
+            mode_str = next(
+                (lbl for lbl, v in MODE_OPTIONS if v == mode_w.value), "?"
+            )
+            status = "● Connected" if self.is_connected else "○ Disconnected"
+            summary = (
+                f"{status}  │  {port_str}  ·  {speed_str}  ·  {mode_str}"
+                f"   [F8 expand]"
+            )
+            self.query_one("#conn-summary", Static).update(summary)
         except Exception:
             pass
 
@@ -2748,17 +3364,8 @@ class CANBusTUI(App):
                     self._w_stats_col_keys = list(stats_tbl.columns)
                 except Exception:
                     pass
-                try:
-                    dbc_panel = ds.query_one(DBCPanel)
-                    msg_tbl = dbc_panel.query_one("#dbc-msg-table", DataTable)
-                    self._w_dbc_msg_col_keys = list(msg_tbl.columns)
-                except Exception:
-                    pass
                 self._update_statistics()
                 self._update_trace_controls()
-                if self._dbc.loaded:
-                    self._populate_dbc_msg_table()
-                    self._update_dbc_status_label()
             except Exception as exc:
                 self._log(f"WARNING: DetailsScreen populate failed: {exc}")
 
@@ -2788,6 +3395,16 @@ class CANBusTUI(App):
             try:
                 fs._store = self._store
                 fs._dbc = self._dbc
+                # Cache DBC table column keys for hot timer callbacks
+                try:
+                    dbc_panel = fs.query_one(DBCPanel)
+                    msg_tbl = dbc_panel.query_one("#dbc-msg-table", DataTable)
+                    self._w_dbc_msg_col_keys = list(msg_tbl.columns)
+                except Exception:
+                    pass
+                if self._dbc.loaded:
+                    self._populate_dbc_msg_table()
+                    self._update_dbc_status_label()
             except Exception as exc:
                 self._log(f"WARNING: FullscreenMonitor init failed: {exc}")
 
@@ -2844,10 +3461,10 @@ class CANBusTUI(App):
 
     def _populate_dbc_msg_table(self) -> None:
         """Fill the DBC messages DataTable from the loaded database."""
-        if self._details_screen is None:
+        if self._fullscreen_monitor is None:
             return
         try:
-            panel = self._details_screen.query_one(DBCPanel)
+            panel = self._fullscreen_monitor.query_one(DBCPanel)
             tbl = panel.query_one("#dbc-msg-table", DataTable)
             tbl.clear()
             for msg in self._dbc.get_messages():
@@ -2866,11 +3483,11 @@ class CANBusTUI(App):
             self._log(f"WARNING: DBC msg table populate failed: {exc}")
 
     def _update_dbc_status_label(self, error: str = "") -> None:
-        """Refresh the DBC status label in the Details screen."""
-        if self._details_screen is None:
+        """Refresh the DBC status label in the Fullscreen Monitor screen."""
+        if self._fullscreen_monitor is None:
             return
         try:
-            lbl = self._details_screen.query_one("#dbc-status", Static)
+            lbl = self._fullscreen_monitor.query_one("#dbc-status", Static)
             t = MIDNIGHT
             if error:
                 lbl.update(f"ERROR: {error}")
@@ -2888,21 +3505,21 @@ class CANBusTUI(App):
             pass
 
     def _clear_dbc_tables(self) -> None:
-        """Clear the DBC messages DataTable in the Details screen."""
-        if self._details_screen is None:
+        """Clear the DBC messages DataTable in the Fullscreen Monitor screen."""
+        if self._fullscreen_monitor is None:
             return
         try:
-            panel = self._details_screen.query_one(DBCPanel)
+            panel = self._fullscreen_monitor.query_one(DBCPanel)
             panel.query_one("#dbc-msg-table", DataTable).clear()
         except Exception:
             pass
 
     def _update_dbc_signals(self) -> None:
         """Timer callback: update live-data indicators in the DBC messages table (1 Hz)."""
-        if self._details_screen is None or not self._dbc.loaded:
+        if self._fullscreen_monitor is None or not self._dbc.loaded:
             return
         try:
-            panel = self._details_screen.query_one(DBCPanel)
+            panel = self._fullscreen_monitor.query_one(DBCPanel)
             msg_tbl = panel.query_one("#dbc-msg-table", DataTable)
         except Exception:
             return
@@ -4129,6 +4746,10 @@ class CANBusTUI(App):
                     sc.styles.color = t["ok"]
                 bc.disabled = True
                 bdc.disabled = False
+                # Auto-collapse panel when connected to give monitor more space
+                self._conn_panel_expanded = False
+                self._apply_conn_panel_visibility()
+                self._update_conn_summary()
             else:
                 sc.update("Disconnected")
                 sc.remove_class("status-connected")
@@ -4136,6 +4757,10 @@ class CANBusTUI(App):
                 sc.styles.color = t["err"]
                 bc.disabled = False
                 bdc.disabled = True
+                # Auto-expand panel on disconnect so user can reconfigure
+                self._conn_panel_expanded = True
+                self._apply_conn_panel_visibility()
+                self._update_conn_summary()
                 # Reset frame-type display on disconnect
                 try:
                     self.query_one("#status-frame-type", Static).update("Frame: -")
@@ -4222,10 +4847,10 @@ class CANBusTUI(App):
 
     def _handle_dbc_load_button(self) -> None:
         """Read the DBC path input and trigger a load."""
-        if self._details_screen is None:
+        if self._fullscreen_monitor is None:
             return
         try:
-            path = self._details_screen.query_one(
+            path = self._fullscreen_monitor.query_one(
                 "#dbc-path-input", Input
             ).value.strip()
         except Exception:
@@ -4297,4 +4922,3 @@ class CANBusTUI(App):
 if __name__ == "__main__":
     app = CANBusTUI(startup_args=parse_cli_args())
     app.run()
-
