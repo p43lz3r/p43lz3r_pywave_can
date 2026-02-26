@@ -54,8 +54,8 @@ No extra driver install needed. `python-can` handles everything via socketcan.
 ### Windows — PEAK PCAN-USB
 
 Download and install the PEAK System driver package from
-https://www.peak-system.com/Downloads. The installer places `PCANBasic.dll`
-which `python-can` uses automatically.
+[https://www.peak-system.com/Downloads](https://www.peak-system.com/PCAN-USB.199.0.html?&L=1).
+The installer places `PCANBasic.dll` which `python-can` uses automatically.
 
 ---
 
