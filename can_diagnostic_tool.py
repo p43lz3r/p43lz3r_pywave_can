@@ -8,7 +8,7 @@ Features: Fixed-view display, DBC decoding, cyclic transmission, filtering
 import sys
 import time
 import argparse
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from collections import defaultdict
 from datetime import datetime
 
@@ -21,7 +21,7 @@ try:
     CANTOOLS_AVAILABLE = True
 except ImportError:
     CANTOOLS_AVAILABLE = False
-    print("⚠ cantools not installed. DBC decoding disabled.")
+    print("âš  cantools not installed. DBC decoding disabled.")
     print("  Install with: pip install cantools")
 
 
@@ -54,20 +54,20 @@ class FixedViewDisplay:
         self.max_ids = max_ids
         self.frame_cache: Dict[int, CANFrame] = {}
         self.stats = CANStatistics()
-        self.db: Optional[cantools.database.Database] = None
+        self.db: Optional[Any] = None  # cantools Database (None if not loaded)
     
     def load_dbc(self, dbc_path: str) -> bool:
         """Load a DBC file for signal decoding"""
         if not CANTOOLS_AVAILABLE:
-            print("✗ cantools not available")
+            print("âœ— cantools not available")
             return False
         
         try:
             self.db = cantools.database.load_file(dbc_path)
-            print(f"✓ Loaded DBC: {dbc_path} ({len(self.db.messages)} messages)")
+            print(f"âœ“ Loaded DBC: {dbc_path} ({len(self.db.messages)} messages)")
             return True
         except Exception as e:
-            print(f"✗ Failed to load DBC: {e}")
+            print(f"âœ— Failed to load DBC: {e}")
             return False
     
     def update(self, frame: CANFrame):
@@ -188,7 +188,7 @@ class CANDiagnosticTool:
         # Start listening
         self.can.start_listening()
         
-        print("\n✓ Diagnostic tool started")
+        print("\nâœ“ Diagnostic tool started")
         print("  Press Ctrl+C to stop\n")
         time.sleep(1)
         
@@ -202,7 +202,7 @@ class CANDiagnosticTool:
                 self.display.render()
                 time.sleep(refresh_rate)
         except KeyboardInterrupt:
-            print("\n\n✓ Stopping...")
+            print("\n\nâœ“ Stopping...")
         finally:
             self.stop()
     
@@ -215,9 +215,9 @@ class CANDiagnosticTool:
         if log_file:
             try:
                 file_handle = open(log_file, 'w')
-                print(f"✓ Logging to {log_file}\n")
+                print(f"âœ“ Logging to {log_file}\n")
             except Exception as e:
-                print(f"✗ Failed to open log file: {e}")
+                print(f"âœ— Failed to open log file: {e}")
         
         try:
             while self.running:
@@ -236,19 +236,19 @@ class CANDiagnosticTool:
                         file_handle.flush()
         
         except KeyboardInterrupt:
-            print("\n✓ Stopping...")
+            print("\nâœ“ Stopping...")
         finally:
             if file_handle:
                 file_handle.close()
-                print(f"✓ Log saved to {log_file}")
+                print(f"âœ“ Log saved to {log_file}")
             self.stop()
     
     def send_message(self, can_id: int, data: bytes, is_extended: bool = True):
         """Send a single CAN message"""
         if self.can.send(can_id, data, is_extended, verbose=True):
-            print(f"✓ Sent: ID=0x{can_id:X}, Data={data.hex(' ').upper()}")
+            print(f"âœ“ Sent: ID=0x{can_id:X}, Data={data.hex(' ').upper()}")
         else:
-            print(f"✗ Failed to send message")
+            print(f"âœ— Failed to send message")
     
     def send_cyclic_message(self, 
                            name: str,
@@ -285,7 +285,7 @@ def main():
         '--speed', '-s',
         type=int,
         default=500,
-        choices=[5, 10, 20, 25, 40, 50, 80, 100, 125, 200, 250, 400, 500, 666, 800, 1000],
+        choices=[5, 10, 20, 50, 100, 125, 200, 250, 400, 500, 800, 1000],
         help='CAN bus speed in kbps (default: 500)'
     )
     
@@ -321,14 +321,12 @@ def main():
     
     args = parser.parse_args()
     
-    # Map speed to enum
+    # Map speed to enum – only values defined in CANSpeed are valid
     speed_map = {
         5: CANSpeed.SPEED_5K, 10: CANSpeed.SPEED_10K, 20: CANSpeed.SPEED_20K,
-        25: CANSpeed.SPEED_25K, 40: CANSpeed.SPEED_40K, 50: CANSpeed.SPEED_50K,
-        80: CANSpeed.SPEED_80K, 100: CANSpeed.SPEED_100K, 125: CANSpeed.SPEED_125K,
+        50: CANSpeed.SPEED_50K, 100: CANSpeed.SPEED_100K, 125: CANSpeed.SPEED_125K,
         200: CANSpeed.SPEED_200K, 250: CANSpeed.SPEED_250K, 400: CANSpeed.SPEED_400K,
-        500: CANSpeed.SPEED_500K, 666: CANSpeed.SPEED_666K, 800: CANSpeed.SPEED_800K,
-        1000: CANSpeed.SPEED_1M
+        500: CANSpeed.SPEED_500K, 800: CANSpeed.SPEED_800K, 1000: CANSpeed.SPEED_1M,
     }
     
     # Map mode to enum
@@ -362,7 +360,7 @@ def main():
             time.sleep(0.2)  # Give message time to transmit
             tool.stop()
         else:
-            print("\n✗ Failed to start CAN interface")
+            print("\nâœ— Failed to start CAN interface")
             sys.exit(1)
         return
     
@@ -383,3 +381,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# 2026-02-12 14:30 v1.0.0
+# 2026-02-24 00:00 v1.1.0 - Add CANFrameType enum, frame_type parameter to setup(),
+#                           rx_frame_count attribute and reset_rx_count() for Auto-Detection.
+#                           Remove dead queue.Full handler (queue is unbounded, maxsize=0).
 """
 Waveshare USB-CAN-A Dongle Interface Class
 Professional CAN bus diagnostic tool with thread-safe operation
@@ -11,34 +13,42 @@ import queue
 import time
 from dataclasses import dataclass
 from typing import Optional, Callable, Dict, List
-from enum import IntEnum
+from enum import IntEnum, Enum
 
 
 class CANSpeed(IntEnum):
-    """CAN Bus Speed Options (index for Waveshare command)"""
-    SPEED_5K = 0x01
-    SPEED_10K = 0x02
-    SPEED_20K = 0x03
-    SPEED_40K = 0x04
-    SPEED_50K = 0x05
-    SPEED_80K = 0x06
-    SPEED_100K = 0x07
-    SPEED_125K = 0x08
-    SPEED_200K = 0x09
-    SPEED_250K = 0x0A
-    SPEED_400K = 0x0B
-    SPEED_500K = 0x0C  # Changed from 0x0D
-    SPEED_666K = 0x0D
-    SPEED_800K = 0x0E
-    SPEED_1M = 0x0F
+    """CAN Bus Speed — protocol byte for Waveshare config command (PDF p.6, byte 3)."""
+    SPEED_1M   = 0x01
+    SPEED_800K = 0x02
+    SPEED_500K = 0x03
+    SPEED_400K = 0x04
+    SPEED_250K = 0x05
+    SPEED_200K = 0x06
+    SPEED_125K = 0x07
+    SPEED_100K = 0x08
+    SPEED_50K  = 0x09
+    SPEED_20K  = 0x0A
+    SPEED_10K  = 0x0B
+    SPEED_5K   = 0x0C
 
 
 class CANMode(IntEnum):
-    """CAN Bus Operating Mode"""
-    NORMAL = 0x00
-    LOOPBACK = 0x01
-    SILENT = 0x02
+    """CAN Bus Mode — protocol byte for config command (PDF p.6, byte 13)."""
+    NORMAL          = 0x00
+    SILENT          = 0x01
+    LOOPBACK        = 0x02
     LOOPBACK_SILENT = 0x03
+
+
+class CANFrameType(IntEnum):
+    """CAN Frame Type — controls which frame type the dongle listens for.
+
+    Maps to byte 4 of the Waveshare setup command (PDF p.6):
+      STANDARD = 0x01  accept 11-bit standard frames only
+      EXTENDED = 0x02  accept both 11-bit and 29-bit extended frames
+    """
+    STANDARD = 0x01
+    EXTENDED = 0x02
 
 
 @dataclass
@@ -84,7 +94,7 @@ class WaveshareCAN:
         self.port = port
         self.timeout = timeout
         self.ser: Optional[serial.Serial] = None
-        self.rx_queue = queue.Queue(maxsize=1000)
+        self.rx_queue = queue.Queue(maxsize=0)  # 0 = unlimited
         self.running = False
         self.rx_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -95,6 +105,9 @@ class WaveshareCAN:
         
         # Callback for received messages
         self.on_message_received: Optional[Callable[[CANFrame], None]] = None
+
+        # Frame counter used by Auto-Detection logic in can_tui.py
+        self.rx_frame_count: int = 0
         
     def open(self) -> bool:
         """
@@ -109,64 +122,79 @@ class WaveshareCAN:
                 self.BAUD_SERIAL, 
                 timeout=self.timeout
             )
-            print(f"✓ Connected to {self.port} at {self.BAUD_SERIAL} bps")
+            print(f"[OK] Connected to {self.port} at {self.BAUD_SERIAL} bps")
             return True
         except Exception as e:
-            print(f"✗ Failed to open {self.port}: {e}")
+            print(f"[ERR] Failed to open {self.port}: {e}")
             return False
     
     def setup(self, 
               speed: CANSpeed = CANSpeed.SPEED_500K,
               mode: CANMode = CANMode.NORMAL,
-              extended: bool = True) -> bool:
+              frame_type: CANFrameType = CANFrameType.EXTENDED) -> bool:
         """
-        Initialize Waveshare dongle with CAN bus parameters
-        
+        Initialize Waveshare dongle with CAN bus parameters.
+
         Args:
-            speed: CAN bus speed (see CANSpeed enum)
-            mode: CAN operating mode (see CANMode enum)
-            extended: Enable extended frame support
-            
+            speed:      CAN bus speed (see CANSpeed enum)
+            mode:       CAN operating mode (see CANMode enum)
+            frame_type: STANDARD (11-bit only) or EXTENDED (11+29-bit)
+
         Returns:
             True if successful
         """
         if not self.ser or not self.ser.is_open:
-            print("✗ Serial port not open")
+            print("[ERR] Serial port not open")
             return False
         
-        # Construct setup command
-        # Format: [0xAA, 0x55, 0x12, Speed, Mode, Filter...(14 bytes), Checksum]
-        # Mode 0x01 = Works with BOTH Standard and Extended frames
-        setup_cmd = [0xAA, 0x55, 0x12, 0x03, 0x01]  # Mode 0x01 - WORKING!
-        setup_cmd.extend([0x00] * 14)  # Filter bytes (unused, set to 0)
-        
-        # Calculate checksum (sum of bytes from index 2 onwards)
-        checksum = sum(setup_cmd[2:]) & 0xFF
+        # Build 20-byte CAN configuration command per Waveshare protocol spec (PDF p.6):
+        # Byte  0-1 : 0xAA 0x55  header
+        # Byte  2   : 0x12       type = variable-length protocol
+        # Byte  3   : speed      CANSpeed enum value
+        # Byte  4   : frame_type CANFrameType enum value (0x01=Std, 0x02=Ext)
+        # Bytes 5-8 : filter_id  0x00000000 = pass all
+        # Bytes 9-12: block_id   0x00000000 = block nothing
+        # Byte  13  : can_mode   CANMode enum value
+        # Byte  14  : 0x00       auto-retransmit enabled
+        # Bytes 15-18: 0x00      backup
+        # Byte  19  : checksum   sum(bytes[2..18]) & 0xFF
+        setup_cmd = [
+            0xAA, 0x55,        # header
+            0x12,              # variable-length protocol
+            int(speed),        # byte 3: CAN baud rate
+            int(frame_type),   # byte 4: frame type (Std or Ext)
+            0x00, 0x00, 0x00, 0x00,  # bytes 5-8:  filter ID (pass all)
+            0x00, 0x00, 0x00, 0x00,  # bytes 9-12: block  ID (block nothing)
+            int(mode),         # byte 13: CAN mode
+            0x00,              # byte 14: auto-retransmit enabled
+            0x00, 0x00, 0x00, 0x00,  # bytes 15-18: backup
+        ]
+        checksum = sum(setup_cmd[2:]) & 0xFF  # sum bytes 2..18
         setup_cmd.append(checksum)
-        
+
         try:
             self.ser.write(bytes(setup_cmd))
-            time.sleep(0.5)  # Give device time to configure (increased from 0.1)
+            time.sleep(0.5)  # Give device time to configure
             
             speed_str = f"{speed.name.replace('SPEED_', '')}bps"
             mode_str = mode.name
-            ext_str = "Extended" if extended else "Standard"
-            print(f"✓ Waveshare initialized: {speed_str}, {mode_str} mode, {ext_str}")
+            ft_str = frame_type.name.capitalize()
+            print(f"[OK] Waveshare initialized: {speed_str}, {mode_str} mode, {ft_str}")
             return True
         except Exception as e:
-            print(f"✗ Setup failed: {e}")
+            print(f"[ERR] Setup failed: {e}")
             return False
     
     def start_listening(self):
         """Start background thread for receiving CAN frames"""
         if self.running:
-            print("⚠ Listener already running")
+            print("[INFO] Listener already running")
             return
         
         self.running = True
         self.rx_thread = threading.Thread(target=self._receive_loop, daemon=True)
         self.rx_thread.start()
-        print("✓ Background listener started")
+        print("[OK] Background listener started")
     
     def stop_listening(self):
         """Stop background receiver thread"""
@@ -176,7 +204,11 @@ class WaveshareCAN:
         self.running = False
         if self.rx_thread:
             self.rx_thread.join(timeout=2.0)
-        print("✓ Listener stopped")
+        print("[OK] Listener stopped")
+
+    def reset_rx_count(self) -> None:
+        """Reset the rx_frame_count to zero (used by Auto-Detection)."""
+        self.rx_frame_count = 0
     
     def _receive_loop(self):
         """
@@ -236,18 +268,16 @@ class WaveshareCAN:
                     timestamp=time.time()
                 )
                 
-                # Step 7: Queue frame and trigger callback
-                try:
-                    self.rx_queue.put_nowait(frame)
-                except queue.Full:
-                    print("⚠ RX Queue full, dropping frame")
-                
+                # Step 7: Queue frame and trigger callback (queue is unbounded)
+                self.rx_queue.put_nowait(frame)
+                self.rx_frame_count += 1  # used by Auto-Detection
+
                 if self.on_message_received:
                     self.on_message_received(frame)
                     
             except Exception as e:
                 if self.running:
-                    print(f"⚠ RX Error: {e}")
+                    print(f"[WARN] RX Error: {e}")
                 time.sleep(0.001)
     
     def send(self, can_id: int, data: bytes, is_extended: bool = True, verbose: bool = False) -> bool:
@@ -264,11 +294,11 @@ class WaveshareCAN:
             True if sent successfully
         """
         if not self.ser or not self.ser.is_open:
-            print("✗ Serial port not open")
+            print("[ERR] Serial port not open")
             return False
         
         if len(data) > 8:
-            print("✗ Data length exceeds 8 bytes")
+            print("[ERR] Data length exceeds 8 bytes")
             return False
         
         try:
@@ -313,7 +343,7 @@ class WaveshareCAN:
                 return True
                 
         except Exception as e:
-            print(f"✗ Send failed: {e}")
+            print(f"[ERR] Send failed: {e}")
             return False
     
     def send_cyclic(self, 
@@ -333,7 +363,7 @@ class WaveshareCAN:
             is_extended: True for extended ID
         """
         if name in self._cyclic_tasks:
-            print(f"⚠ Cyclic task '{name}' already exists")
+            print(f"[WARN] Cyclic task '{name}' already exists")
             return
         
         stop_event = threading.Event()
@@ -348,19 +378,19 @@ class WaveshareCAN:
         thread.start()
         self._cyclic_tasks[name] = thread
         
-        print(f"✓ Cyclic task '{name}' started: ID 0x{can_id:X} every {period_ms}ms")
+        print(f"[OK] Cyclic task '{name}' started: ID 0x{can_id:X} every {period_ms}ms")
     
     def stop_cyclic(self, name: str):
         """Stop a cyclic transmission task"""
         if name not in self._cyclic_tasks:
-            print(f"⚠ Cyclic task '{name}' not found")
+            print(f"[WARN] Cyclic task '{name}' not found")
             return
         
         self._cyclic_stop_events[name].set()
         self._cyclic_tasks[name].join(timeout=1.0)
         del self._cyclic_tasks[name]
         del self._cyclic_stop_events[name]
-        print(f"✓ Cyclic task '{name}' stopped")
+        print(f"[OK] Cyclic task '{name}' stopped")
     
     def get_frame(self, timeout: Optional[float] = None) -> Optional[CANFrame]:
         """
@@ -389,7 +419,7 @@ class WaveshareCAN:
         # Close serial port
         if self.ser and self.ser.is_open:
             self.ser.close()
-            print("✓ Connection closed")
+            print("[OK] Connection closed")
 
 
 # Example usage
@@ -397,7 +427,8 @@ if __name__ == "__main__":
     can = WaveshareCAN()
     
     if can.open():
-        can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL)
+        can.setup(speed=CANSpeed.SPEED_500K, mode=CANMode.NORMAL,
+                  frame_type=CANFrameType.EXTENDED)
         can.start_listening()
         
         # Example: Send a test frame
@@ -412,3 +443,4 @@ if __name__ == "__main__":
                 print(frame)
         
         can.close()
+
