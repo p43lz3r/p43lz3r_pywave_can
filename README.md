@@ -20,6 +20,16 @@ trace recording, and signal discovery — all from the terminal, on Linux and Wi
 > Layout and usability improvements are being worked on.
 
 ---
+## Supported Hardware
+
+⚠️ **PEAK PCAN-USB on Linux** has not been tested and confirmed. The Linux socketcan implementation is included based on the `python-can` documentation but should be considered experimental. Only Windows 11 with the official [PEAK System driver](https://www.peak-system.com/Downloads) installed has been verified to work.
+
+
+| Device | Price | Windows | Linux | Interface |
+|---|---|---|---|---|
+| Waveshare USB-CAN-A | ~$25 | ✅ COM port | ✅ `/dev/ttyUSB*` | Serial (2 Mbps) |
+| PEAK PCAN-USB | ? | ✅ PCAN_USBBUSn | ⚠️ `can0` / `PCAN_USBBUSn` | python-can |
+---
 
 ## Requirements
 
