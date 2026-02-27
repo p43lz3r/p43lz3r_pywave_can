@@ -138,7 +138,7 @@ Once connected, the monitor shows a live table — one row per CAN-ID:
 | Count | Total frames received |
 | Signal | Decoded signal name from DBC (if loaded) |
 
-### Signal Discovery (F7)
+### Signal Discovery (F7) (experimental feature)
 
 Signal Discovery helps you find which CAN-IDs change when you interact with
 a vehicle component (press a button, turn a knob, etc.).
